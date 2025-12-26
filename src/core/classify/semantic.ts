@@ -390,14 +390,15 @@ async function precomputeIssueEmbeddings(
     processedCount = Math.min(i + issueBatchSize, issuesToEmbed.length);
     logProgress(`Embedded ${processedCount}/${issuesToEmbed.length} new issues (${Math.round((processedCount / issuesToEmbed.length) * 100)}%)`);
 
+    // Save cache after each batch to avoid losing progress if process breaks
+    if (cacheModified) {
+      savePersistentCache(persistentCache);
+      cacheModified = false; // Reset flag after saving
+    }
+
     if (i + issueBatchSize < issuesToEmbed.length) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
-  }
-  
-  // Save updated cache to disk
-  if (cacheModified) {
-    savePersistentCache(persistentCache);
   }
   
   logProgress(`Completed: ${cachedCount} from cache + ${issuesToEmbed.length} newly embedded = ${totalIssues} total`);
