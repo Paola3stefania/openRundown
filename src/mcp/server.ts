@@ -1436,9 +1436,65 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use semantic classification by default when OpenAI is available (issues are always cached now)
       const useSemantic = classifyConfig.classification.useSemantic;
 
+      // Determine output file path BEFORE processing (so we can save incrementally)
+      const existingFiles = await readdir(resultsDir).catch(() => []);
+      const existingClassificationFile = existingFiles
+        .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+        .sort()
+        .reverse()[0]; // Most recent
+
+      let outputPath: string;
+      let existingClassifiedThreads: any[] = [];
+
+      if (existingClassificationFile) {
+        outputPath = join(resultsDir, existingClassificationFile);
+        try {
+          const existingContent = await readFile(outputPath, "utf-8");
+          const existingData = JSON.parse(existingContent);
+          existingClassifiedThreads = existingData.classified_threads || [];
+          console.error(`[Classification] Will merge into existing file: ${existingClassificationFile} (${existingClassifiedThreads.length} threads)`);
+        } catch {
+          // If can't read, create new
+          const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
+          outputPath = join(resultsDir, `discord-classified-${safeChannelName}-${actualChannelId}-${Date.now()}.json`);
+        }
+      } else {
+        const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
+        outputPath = join(resultsDir, `discord-classified-${safeChannelName}-${actualChannelId}-${Date.now()}.json`);
+        console.error(`[Classification] Creating new file: ${outputPath}`);
+      }
+
+      // Map to track all classified threads (existing + new)
+      const threadMap = new Map<string, any>();
+      for (const thread of existingClassifiedThreads) {
+        const threadId = thread.thread?.thread_id || thread.thread_id;
+        if (threadId) threadMap.set(threadId, thread);
+      }
+
+      // Helper to save current progress to JSON file
+      const saveProgressToFile = async (newlyClassifiedCount: number) => {
+        const mergedThreads = Array.from(threadMap.values());
+        const result = {
+          channel_id: actualChannelId,
+          channel_name: channelName,
+          analysis_date: new Date().toISOString(),
+          summary: {
+            total_threads_in_file: mergedThreads.length,
+            total_messages_in_cache: discordMessages.length,
+            newly_classified: newlyClassifiedCount,
+            previously_classified: existingClassifiedThreads.length,
+          },
+          classified_threads: mergedThreads,
+        };
+        await writeFile(outputPath, JSON.stringify(result, null, 2), "utf-8");
+      };
+
       for (let i = 0; i < discordMessages.length; i += BATCH_SIZE) {
         const batch = discordMessages.slice(i, i + BATCH_SIZE);
-        const batchEnd = Math.min(i + BATCH_SIZE, discordMessages.length);
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(discordMessages.length / BATCH_SIZE);
+
+        console.error(`[Classification] Processing batch ${batchNum}/${totalBatches} (${batch.length} threads)...`);
 
         // Mark batch threads/messages as "classifying"
         batch.forEach((msg) => {
@@ -1454,9 +1510,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Classify batch
           const batchClassified = await classifyMessagesWithCache(batch, issues, min_similarity, useSemantic);
 
-          // Update classification history with batch results
+          // Update classification history and thread map with batch results
           batchClassified.forEach((classifiedMsg) => {
-            const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; messageIds?: string[] };
+            const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
             
             const issuesMatched = classifiedMsg.relatedIssues.map((match) => ({
               issue_number: match.issue.number,
@@ -1484,11 +1540,40 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 updatedHistory
               );
             });
+
+            // Add to thread map for JSON output
+            const relatedIssues = classifiedMsg.relatedIssues.map((match) => ({
+              number: match.issue.number,
+              title: match.issue.title,
+              state: match.issue.state,
+              url: match.issue.html_url,
+              similarity_score: match.similarityScore,
+              matched_terms: match.matchedTerms,
+              labels: match.issue.labels.map((l) => l.name),
+              author: match.issue.user.login,
+              created_at: match.issue.created_at,
+            }));
+
+            threadMap.set(threadId, {
+              thread: {
+                thread_id: threadId,
+                thread_name: msg.threadName || undefined,
+                message_count: messageIds.length,
+                first_message_id: classifiedMsg.message.id,
+                first_message_author: classifiedMsg.message.author,
+                first_message_timestamp: classifiedMsg.message.timestamp,
+                first_message_url: classifiedMsg.message.url,
+                classified_status: "completed",
+                message_ids: messageIds,
+                is_standalone: !msg.threadId,
+              },
+              issues: relatedIssues,
+            });
           });
 
           // Mark threads/messages that were processed but didn't get matches as completed
           batch.forEach((msg) => {
-            const threadMsg = msg as DiscordMessage & { threadId?: string; messageIds?: string[] };
+            const threadMsg = msg as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
             const threadId = threadMsg.threadId || msg.id;
             const currentStatus = getThreadStatus(threadId, updatedHistory);
             if (currentStatus === "classifying") {
@@ -1499,16 +1584,33 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
               );
               if (!wasClassified) {
-                // Thread/message was processed but no matches found - still mark as completed
                 updateThreadStatus(updatedHistory, threadId, actualChannelId, "completed", []);
+                // Also add to thread map with empty issues
+                threadMap.set(threadId, {
+                  thread: {
+                    thread_id: threadId,
+                    thread_name: threadMsg.threadName || undefined,
+                    message_count: threadMsg.messageIds?.length || 1,
+                    first_message_id: msg.id,
+                    first_message_author: msg.author,
+                    first_message_timestamp: msg.timestamp,
+                    first_message_url: msg.url,
+                    classified_status: "completed",
+                    message_ids: threadMsg.messageIds || [msg.id],
+                    is_standalone: !threadMsg.threadId,
+                  },
+                  issues: [],
+                });
               }
             }
           });
 
           allClassified.push(...batchClassified);
 
-          // Save progress after each batch
+          // Save progress after each batch (both history AND JSON file)
           await saveClassificationHistory(updatedHistory, resultsDir);
+          await saveProgressToFile(allClassified.length);
+          console.error(`[Classification] Batch ${batchNum}/${totalBatches} complete. Saved ${threadMap.size} total threads to file.`);
 
         } catch (error) {
           // Mark batch threads/messages as failed if classification errored
@@ -1520,77 +1622,30 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               updateThreadStatus(updatedHistory, threadId, actualChannelId, "failed");
             }
           });
-          // Save progress even on error so we know which batch failed
+          // Save progress even on error
           await saveClassificationHistory(updatedHistory, resultsDir);
+          await saveProgressToFile(allClassified.length);
           throw error;
         }
       }
 
       const classified = allClassified;
 
-      // Treat all messages as threads (even standalone messages) for consistency
-      const threadClassifications: any[] = [];
-
-      classified.forEach((classifiedMsg) => {
-        const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
-        
-        // For standalone messages, use message ID as thread ID for consistency
-        const threadId = msg.threadId || classifiedMsg.message.id;
-        const threadStatus = getThreadStatus(threadId, updatedHistory) || "completed";
-        
-        const relatedIssues = classifiedMsg.relatedIssues.map((match) => ({
-          number: match.issue.number,
-          title: match.issue.title,
-          state: match.issue.state,
-          url: match.issue.html_url,
-          similarity_score: match.similarityScore,
-          matched_terms: match.matchedTerms,
-          labels: match.issue.labels.map((l) => l.name),
-          author: match.issue.user.login,
-          created_at: match.issue.created_at,
-        }));
-
-        // Treat everything as a thread for consistency
-        threadClassifications.push({
-          thread: {
-            thread_id: threadId,
-            thread_name: msg.threadName || undefined,
-            message_count: msg.messageIds?.length || 1,
-            first_message_id: classifiedMsg.message.id,
-            first_message_author: classifiedMsg.message.author,
-            first_message_timestamp: classifiedMsg.message.timestamp,
-            first_message_url: classifiedMsg.message.url,
-            classified_status: threadStatus,
-            message_ids: msg.messageIds || [classifiedMsg.message.id], // Always include message IDs
-            is_standalone: !msg.threadId, // Flag to indicate if this was originally a standalone message
-          },
-          issues: relatedIssues,
-        });
-      });
+      // Final summary (file was already saved incrementally after each batch)
+      const mergedThreads = Array.from(threadMap.values());
 
       const result = {
         channel_id: actualChannelId,
         channel_name: channelName,
         analysis_date: new Date().toISOString(),
         summary: {
-          total_messages: discordMessages.length,
-          classified_count: classified.length,
-          thread_count: threadClassifications.length,
-          coverage_percentage: parseFloat(((classified.length / discordMessages.length) * 100).toFixed(1)),
+          total_threads_in_file: mergedThreads.length,
+          total_messages_in_cache: discordMessages.length,
           newly_classified: classified.length,
+          previously_classified: existingClassifiedThreads.length,
         },
-        classified_threads: threadClassifications,
+        classified_threads: mergedThreads,
       };
-
-      // Save to results file (resultsDir already created when loading history)
-      // Use a single file per channel instead of creating new timestamped files
-      const safeChannelName = (result.channel_name || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
-      const outputPath = join(
-        resultsDir,
-        `discord-classified-${actualChannelId}.json`
-      );
-
-      await writeFile(outputPath, JSON.stringify(result, null, 2), "utf-8");
 
       return {
         content: [
@@ -1599,7 +1654,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: JSON.stringify({
               ...result,
               output_file: outputPath,
-              message: `Classification complete. Results saved to: ${outputPath}`,
+              message: classified.length > 0 
+                ? `Classified ${classified.length} new threads. Total in file: ${mergedThreads.length}. Saved to: ${outputPath}`
+                : `No new threads to classify. File has ${mergedThreads.length} classified threads. File: ${outputPath}`,
             }, null, 2),
           },
         ],
@@ -2152,6 +2209,32 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             topIssuesPerThread: 3,
           });
           
+          // Find existing grouping file to merge with
+          await mkdir(resultsDir, { recursive: true });
+          const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
+          const existingGroupingFile = existingGroupingFiles
+            .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+            .sort()
+            .reverse()[0];
+
+          let outputPath: string;
+          let existingGroups: any[] = [];
+
+          if (existingGroupingFile) {
+            outputPath = join(resultsDir, existingGroupingFile);
+            try {
+              const existingContent = await readFile(outputPath, "utf-8");
+              const existingData = JSON.parse(existingContent);
+              existingGroups = existingData.groups || [];
+              console.error(`[Grouping] Merging with existing file: ${existingGroupingFile} (${existingGroups.length} groups)`);
+            } catch {
+              outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+            }
+          } else {
+            outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+            console.error(`[Grouping] Creating new file: ${outputPath}`);
+          }
+          
           // Save groups to history
           for (const group of groupResult.groups) {
             addGroup(history, {
@@ -2188,17 +2271,28 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             })),
           }));
           
-          // Save results to file
-          await mkdir(resultsDir, { recursive: true });
-          const outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+          // Merge with existing groups (deduplicate by group id)
+          const groupMap = new Map<string, any>();
+          for (const group of existingGroups) {
+            groupMap.set(group.id, group);
+          }
+          for (const group of formattedGroups) {
+            groupMap.set(group.id, group); // New groups overwrite existing
+          }
+          const mergedGroups = Array.from(groupMap.values());
           
           outputData = {
             timestamp: new Date().toISOString(),
             channel_id: actualChannelId,
             grouping_method: "issue-based",
             options: { min_similarity, max_groups },
-            stats: groupResult.stats,
-            groups: formattedGroups,
+            stats: {
+              ...groupResult.stats,
+              total_groups_in_file: mergedGroups.length,
+              newly_grouped: formattedGroups.length,
+              previously_grouped: existingGroups.length,
+            },
+            groups: mergedGroups,
           };
           
           await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
@@ -2215,14 +2309,19 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   description: "Discord threads grouped by their matched GitHub issues. Threads that matched the same issue are in the same group.",
                   stats: {
                     ...groupResult.stats,
+                    total_groups_in_file: mergedGroups.length,
+                    newly_grouped: formattedGroups.length,
+                    previously_grouped: existingGroups.length,
                     total_groups_in_history: updatedGroupStats.totalGroups,
                     exported_groups: updatedGroupStats.exportedGroups,
                     pending_groups: updatedGroupStats.pendingGroups,
                   },
-                  groups_count: formattedGroups.length,
-                  groups: formattedGroups,
+                  groups_count: mergedGroups.length,
+                  groups: mergedGroups,
                   output_file: outputPath,
-                  message: `Created ${formattedGroups.length} groups from ${groupResult.stats.totalThreads} Discord threads. Each group is linked to a GitHub issue. Results saved to ${outputPath}`,
+                  message: formattedGroups.length > 0
+                    ? `Added ${formattedGroups.length} new groups. Total in file: ${mergedGroups.length}. Saved to ${outputPath}`
+                    : `No new groups. File has ${mergedGroups.length} groups. File: ${outputPath}`,
                 }, null, 2),
               },
             ],
@@ -2347,6 +2446,32 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             maxGroups: max_groups,
           });
           
+          // Find existing grouping file to merge with
+          await mkdir(resultsDir, { recursive: true });
+          const existingSemanticFiles = await readdir(resultsDir).catch(() => []);
+          const existingSemanticFile = existingSemanticFiles
+            .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+            .sort()
+            .reverse()[0];
+
+          let semanticOutputPath: string;
+          let existingSemanticGroups: any[] = [];
+
+          if (existingSemanticFile) {
+            semanticOutputPath = join(resultsDir, existingSemanticFile);
+            try {
+              const existingContent = await readFile(semanticOutputPath, "utf-8");
+              const existingData = JSON.parse(existingContent);
+              existingSemanticGroups = existingData.groups || [];
+              console.error(`[Grouping] Merging with existing file: ${existingSemanticFile} (${existingSemanticGroups.length} groups)`);
+            } catch {
+              semanticOutputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+            }
+          } else {
+            semanticOutputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+            console.error(`[Grouping] Creating new file: ${semanticOutputPath}`);
+          }
+          
           // Save groups to history
           for (const group of result.groups) {
             addGroup(history, {
@@ -2362,7 +2487,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await saveClassificationHistory(history, resultsDir);
           
           // Format output
-          const formattedGroups = result.groups.map(group => ({
+          const formattedSemanticGroups = result.groups.map(group => ({
             id: group.id,
             suggested_title: group.suggestedTitle,
             similarity: Math.round(group.similarity * 100) / 100,
@@ -2385,21 +2510,33 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             } : null,
           }));
           
-          await mkdir(resultsDir, { recursive: true });
-          const outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+          // Merge with existing groups
+          const semanticGroupMap = new Map<string, any>();
+          for (const group of existingSemanticGroups) {
+            semanticGroupMap.set(group.id, group);
+          }
+          for (const group of formattedSemanticGroups) {
+            semanticGroupMap.set(group.id, group);
+          }
+          const mergedSemanticGroups = Array.from(semanticGroupMap.values());
           
           outputData = {
             timestamp: new Date().toISOString(),
             channel_id: actualChannelId,
             grouping_method: "semantic",
             options: { min_similarity, max_groups },
-            stats: result.stats,
+            stats: {
+              ...result.stats,
+              total_groups_in_file: mergedSemanticGroups.length,
+              newly_grouped: formattedSemanticGroups.length,
+              previously_grouped: existingSemanticGroups.length,
+            },
             features: features.map(f => ({ id: f.id, name: f.name })),
-            groups: formattedGroups,
+            groups: mergedSemanticGroups,
             ungrouped_count: result.ungroupedSignals.length,
           };
           
-          await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          await writeFile(semanticOutputPath, JSON.stringify(outputData, null, 2), "utf-8");
           
           const updatedGroupStats = getGroupingStats(history);
           
@@ -2413,16 +2550,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   description: "Signals grouped by semantic similarity. Use without semantic_only=true to get issue-based grouping.",
                   stats: {
                     ...result.stats,
+                    total_groups_in_file: mergedSemanticGroups.length,
+                    newly_grouped: formattedSemanticGroups.length,
+                    previously_grouped: existingSemanticGroups.length,
                     total_groups_in_history: updatedGroupStats.totalGroups,
                     exported_groups: updatedGroupStats.exportedGroups,
                     pending_groups: updatedGroupStats.pendingGroups,
                   },
-                  groups_count: formattedGroups.length,
-                  cross_cutting_count: formattedGroups.filter(g => g.is_cross_cutting).length,
+                  groups_count: mergedSemanticGroups.length,
+                  cross_cutting_count: mergedSemanticGroups.filter((g: any) => g.is_cross_cutting).length,
                   features_used: features.map(f => f.name),
-                  groups: formattedGroups,
-                  output_file: outputPath,
-                  message: `Found ${formattedGroups.length} groups (${formattedGroups.filter(g => g.is_cross_cutting).length} cross-cutting). Results saved to ${outputPath}`,
+                  groups: mergedSemanticGroups,
+                  output_file: semanticOutputPath,
+                  message: formattedSemanticGroups.length > 0
+                    ? `Added ${formattedSemanticGroups.length} new groups. Total in file: ${mergedSemanticGroups.length}. Saved to ${semanticOutputPath}`
+                    : `No new groups. File has ${mergedSemanticGroups.length} groups. File: ${semanticOutputPath}`,
                 }, null, 2),
               },
             ],

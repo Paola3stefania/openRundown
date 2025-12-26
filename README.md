@@ -120,6 +120,12 @@ You can also fetch separately:
 
 **Note:** Classification requires cached issues. The classification tool will automatically fetch them if needed.
 
+**Incremental Saving:**
+- Processes messages in batches of 50
+- Saves results to JSON file **after each batch** (crash-safe)
+- Merges new results into existing file if one exists
+- Output file: `results/discord-classified-{channelName}-{channelId}-{timestamp}.json`
+
 ### Automated Workflow
 
 The `classify_discord_messages` tool automatically syncs before classifying.
@@ -142,6 +148,11 @@ Use the `suggest_grouping` MCP tool to group Discord threads by their matched Gi
 ```
 suggest_grouping → results/grouping-{channelId}-{timestamp}.json
 ```
+
+**File Management:**
+- Creates a new timestamped file on first run
+- Subsequent runs **merge** new groups into the same file (deduplicates by group ID)
+- Each run updates the file with newly grouped threads
 
 **Options:**
 - `min_similarity`: Minimum score for issue matching (0-100, default 60)
