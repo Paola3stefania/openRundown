@@ -25,10 +25,7 @@ DISCORD_DEFAULT_CHANNEL_ID=your_channel_id
 ## Testing Steps
 
 ### 1. Validate Setup
-```bash
-npm run validate-linear
-```
-Checks environment variables, API keys, and classified data.
+Use `validate_pm_setup` MCP tool to check environment variables, API keys, and classified data.
 
 ### 2. Prepare Classified Data
 Run classification workflow:

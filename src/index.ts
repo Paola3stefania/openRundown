@@ -43,6 +43,7 @@ import { log, logError } from "./logger.js";
 import { runExportWorkflow } from "./pm-integration/export-workflow.js";
 import type { PMToolConfig } from "./pm-integration/types.js";
 import { createPMTool } from "./pm-integration/pm-tool-factory.js";
+import { validatePMSetup } from "./pm-validation.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -354,6 +355,14 @@ const tools: Tool[] = [
       type: "object",
       properties: {},
       required: [],
+    },
+  },
+  {
+    name: "validate_pm_setup",
+    description: "Validate PM tool (Linear) export configuration. Checks environment variables, API keys, and classified data existence.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
 ];
@@ -1730,6 +1739,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Failed to list Linear teams:", error);
         throw new Error(`Failed to list Linear teams: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "validate_pm_setup": {
+      try {
+        const validation = validatePMSetup();
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: validation.valid,
+                valid: validation.valid,
+                errors: validation.errors,
+                warnings: validation.warnings,
+                info: validation.info,
+                message: validation.valid
+                  ? "Setup looks good. You can proceed with export."
+                  : "Setup has errors. Please fix them before exporting.",
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Validation failed:", error);
+        throw new Error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
