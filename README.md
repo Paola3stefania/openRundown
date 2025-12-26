@@ -13,6 +13,17 @@ UNMute is an MCP server that integrates communication platforms (Discord, GitHub
 - **Slack**: Message classification and issue correlation
 - **Additional platforms**: Coming soon
 
+## Non-Goals
+
+UNMute intentionally does **not**:
+
+- **Auto-close issues** — Linear owns the issue lifecycle. UNMute surfaces and groups signals, but closing happens via PR merge (Linear's native GitHub integration)
+- **Infer PR fixes** — We don't guess which PR fixes which issue. Engineers explicitly reference Linear issue IDs (`LIN-123`) in PRs
+- **Auto-merge duplicates** — Grouping is suggestive, not automatic. Humans confirm merges
+- **Replace your PM tool** — UNMute feeds data into Linear/Jira; it doesn't replace them
+
+See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the full contract.
+
 ## Features
 
 ### Discord Integration
@@ -37,6 +48,13 @@ UNMute is an MCP server that integrates communication platforms (Discord, GitHub
 - Thread-aware classification
 - Classification history tracking
 - Automatically syncs issues and messages before classifying
+
+### Semantic Grouping
+
+- **Hybrid grouping**: Group related signals by semantic similarity, then map to features
+- **Cross-cutting detection**: Identify issues affecting multiple product features
+- **Shared embedding cache**: Embeddings computed once, reused by classification and grouping
+- **Feature mapping**: Map groups to product features extracted from documentation
 
 ### PM Tool Export
 
@@ -111,6 +129,52 @@ Alternatively, use `sync_and_classify` MCP tool which provides a unified workflo
 2. Sync GitHub issues (incremental)
 3. Classify messages with issues
 
+### Grouping Related Threads
+
+Use the `suggest_grouping` MCP tool to group Discord threads by their matched GitHub issues:
+
+**Workflow:**
+1. Checks for existing 1-to-1 classification results
+2. If not found, runs `classify_discord_messages` first
+3. Groups threads by their matched GitHub issues (threads matching the same issue → same group)
+4. Outputs groups with issue metadata
+
+```
+suggest_grouping → results/grouping-{channelId}-{timestamp}.json
+```
+
+**Options:**
+- `min_similarity`: Minimum score for issue matching (0-100, default 60)
+- `max_groups`: Maximum groups to return (default 50)
+- `re_classify`: Force re-classification before grouping
+- `semantic_only`: Use pure semantic similarity instead of issue-based grouping
+
+**Output (issue-based grouping):**
+```json
+{
+  "grouping_method": "issue-based",
+  "groups": [{
+    "id": "issue-4555",
+    "github_issue": {
+      "number": 4555,
+      "title": "ElysiaJS session not working",
+      "state": "open",
+      "labels": ["bug", "elysia"]
+    },
+    "thread_count": 3,
+    "threads": [
+      { "thread_id": "...", "similarity_score": 81.5 },
+      { "thread_id": "...", "similarity_score": 79.2 }
+    ]
+  }]
+}
+```
+
+**Why issue-based?**
+- More accurate: Groups are anchored to real GitHub issues
+- Reuses classification: No extra embeddings needed
+- Action-ready: Each group links to an existing issue
+
 ### PM Tool Export
 
 Use the `export_to_pm_tool` MCP tool to:
@@ -120,21 +184,43 @@ Use the `export_to_pm_tool` MCP tool to:
 
 Configure `DOCUMENTATION_URLS` in `.env` (can be URLs like `https://docs.example.com/docs` which will be crawled, or local file paths).
 
-## MCP Tools
+## MCP Tools (Stable API)
 
-Available tools via Model Context Protocol:
+These tool names are **stable** and will not change. Semantics may evolve, but names are fixed. New tools are additive only.
 
-- `list_servers`: List Discord servers
-- `list_channels`: List channels in a server
-- `read_messages`: Read messages from a channel
-- `search_messages`: Search messages in a channel
-- `search_github_issues`: Search GitHub issues
-- `search_discord_and_github`: Search both Discord and GitHub
-- `fetch_github_issues`: Fetch and cache GitHub issues
-- `fetch_discord_messages`: Fetch and cache Discord messages
-- `classify_discord_messages`: Classify messages with GitHub issues (automatically syncs issues and messages first)
-- `sync_and_classify`: Automated sync and classification workflow
-- `export_to_pm_tool`: Export to PM tools (Linear, Jira)
+### Core Workflow Tools
+
+| Tool | Description |
+|------|-------------|
+| `sync_and_classify` | Full workflow: sync messages, sync issues, classify |
+| `classify_discord_messages` | Classify messages with GitHub issues (auto-syncs first) |
+| `suggest_grouping` | Group threads by matched issues (runs classification if needed) |
+| `export_to_pm_tool` | Export classified data to Linear, Jira |
+
+### Data Fetching Tools
+
+| Tool | Description |
+|------|-------------|
+| `fetch_discord_messages` | Fetch and cache Discord messages (incremental) |
+| `fetch_github_issues` | Fetch and cache GitHub issues (incremental) |
+
+### Discovery Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_servers` | List Discord servers the bot can access |
+| `list_channels` | List channels in a Discord server |
+| `read_messages` | Read messages from a channel |
+| `search_messages` | Search messages in a channel |
+| `search_github_issues` | Search GitHub issues |
+| `search_discord_and_github` | Search both Discord and GitHub |
+
+### PM Tool Management
+
+| Tool | Description |
+|------|-------------|
+| `list_linear_teams` | List Linear teams (for configuration) |
+| `validate_pm_setup` | Validate PM tool configuration |
 
 ## Project Structure
 
@@ -183,12 +269,21 @@ unmute-mcp/
 ## Documentation
 
 See the `docs/` folder for detailed documentation:
-- `GITHUB_INTEGRATION.md`: GitHub API integration
+
+### Contracts & Architecture
+- `LINEAR_GITHUB_CONTRACT.md`: How UNMute integrates with Linear's GitHub integration
+- `LINEAR_TEAM_SETUP.md`: Setting up Linear teams and projects
+
+### Features
 - `CLASSIFICATION_EXPLAINED.md`: Classification process
 - `SEMANTIC_CLASSIFICATION.md`: LLM-based semantic classification
 - `THREAD_DETECTION.md`: Discord thread handling
+
+### Integration Guides
+- `GITHUB_INTEGRATION.md`: GitHub API integration
 - `RATE_LIMIT_INFO.md`: GitHub API rate limits
 - `explain-permissions.md`: Discord bot permissions
+- `TESTING_LINEAR_EXPORT.md`: Testing the Linear export workflow
 
 ## License
 

@@ -28,7 +28,7 @@ import {
   type IssuesCache,
 } from "../connectors/github/client.js";
 import { loadDiscordCache, getAllMessagesFromCache, getMostRecentMessageDate, mergeMessagesByThread, organizeMessagesByThread, getThreadContextForMessage, type DiscordCache, type DiscordMessage as CachedDiscordMessage } from "../storage/cache/discordCache.js";
-import { loadClassificationHistory, saveClassificationHistory, filterUnclassifiedMessages, addMessageClassification, updateThreadStatus, getThreadStatus, migrateStandaloneToThread, type ClassificationHistory } from "../storage/cache/classificationHistory.js";
+import { loadClassificationHistory, saveClassificationHistory, filterUnclassifiedMessages, addMessageClassification, updateThreadStatus, getThreadStatus, migrateStandaloneToThread, filterUngroupedSignals, addGroup, getGroupingStats, type ClassificationHistory } from "../storage/cache/classificationHistory.js";
 import { getConfig } from "../config/index.js";
 import {
   classifyMessagesWithCache,
@@ -37,12 +37,16 @@ import {
 } from "../core/classify/classifier.js";
 import { join } from "path";
 import { existsSync, writeFileSync, mkdirSync } from "fs";
-import { writeFile, mkdir, readdir } from "fs/promises";
+import { writeFile, mkdir, readdir, readFile } from "fs/promises";
 import { logError } from "./logger.js";
 import { runExportWorkflow } from "../export/workflow.js";
-import type { PMToolConfig } from "../export/types.js";
+import type { PMToolConfig, ProductFeature } from "../export/types.js";
 import { createPMTool } from "../export/factory.js";
 import { validatePMSetup } from "../export/validation.js";
+import { groupSignalsSemantic, groupByClassificationResults, type Feature, type ClassificationResults } from "../core/correlate/grouper.js";
+import type { Signal } from "../types/signal.js";
+import { fetchMultipleDocumentation } from "../export/documentationFetcher.js";
+import { extractFeaturesFromDocumentation } from "../export/featureExtractor.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -335,13 +339,17 @@ const tools: Tool[] = [
   },
   {
     name: "export_to_pm_tool",
-    description: "Export classified Discord messages and GitHub issues to a PM tool (Linear, Jira, etc.) by extracting features from documentation and mapping conversations to features. Uses configuration from environment variables (DOCUMENTATION_URLS, PM_TOOL_*).",
+    description: "Export classified Discord messages and GitHub issues to a PM tool (Linear, Jira, etc.) by extracting features from documentation and mapping conversations to features. Can use either classification results or grouping results. Uses configuration from environment variables (DOCUMENTATION_URLS, PM_TOOL_*).",
     inputSchema: {
       type: "object",
       properties: {
         classified_data_path: {
           type: "string",
           description: "Path to the classified Discord messages JSON file (defaults to latest classified file for default channel)",
+        },
+        grouping_data_path: {
+          type: "string",
+          description: "Path to the grouping results JSON file (from suggest_grouping). If provided, exports groups directly without re-mapping to features.",
         },
       },
       required: [],
@@ -362,6 +370,42 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {},
+    },
+  },
+  {
+    name: "suggest_grouping",
+    description: "Group related Discord messages by their matched GitHub issues from 1-to-1 classification. If no classification exists, runs classification first. Returns groups where Discord threads are linked via shared GitHub issues. Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Discord channel ID. If not provided, uses DISCORD_DEFAULT_CHANNEL_ID from config.",
+        },
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold for issue matching (0-100, default 60)",
+          minimum: 0,
+          maximum: 100,
+          default: 60,
+        },
+        max_groups: {
+          type: "number",
+          description: "Maximum number of groups to return (default 50)",
+          default: 50,
+        },
+        re_classify: {
+          type: "boolean",
+          description: "If true, re-run classification before grouping (default false)",
+          default: false,
+        },
+        semantic_only: {
+          type: "boolean",
+          description: "If true, use pure semantic similarity instead of issue-based grouping (default false)",
+          default: false,
+        },
+      },
+      required: [],
     },
   },
 ];
@@ -1707,8 +1751,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "export_to_pm_tool": {
-      const { classified_data_path } = args as {
+      const { classified_data_path, grouping_data_path } = args as {
         classified_data_path?: string;
+        grouping_data_path?: string;
       };
 
       try {
@@ -1717,11 +1762,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check if PM integration is enabled
         if (!config.pmIntegration?.enabled) {
           throw new Error("PM integration requires PM_TOOL_TYPE to be set in environment variables (e.g., PM_TOOL_TYPE=linear).");
-        }
-
-        // Get documentation URLs from config
-        if (!config.pmIntegration.documentation_urls || config.pmIntegration.documentation_urls.length === 0) {
-          throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in environment variables (comma-separated, can be URLs or local file paths).");
         }
 
         // Get PM tool configuration from config
@@ -1740,15 +1780,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
         const actualChannelId = config.discord.defaultChannelId;
 
-        // Determine classified data path
-        let classifiedPath = classified_data_path;
-        if (!classifiedPath) {
-          if (!actualChannelId) {
-            throw new Error("Channel ID is required. Provide classified_data_path or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
-          }
-          classifiedPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
-        }
-
         // Build PM tool configuration from config
         const pmToolConfig: PMToolConfig = {
           type: config.pmIntegration.pm_tool.type,
@@ -1757,12 +1788,50 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           team_id: config.pmIntegration.pm_tool.team_id,
         };
 
-        // Run export workflow
-        const result = await runExportWorkflow(
-          config.pmIntegration.documentation_urls,
-          classifiedPath,
-          pmToolConfig
-        );
+        let result;
+        let sourceFile: string;
+        
+        // Option 1: Export from grouping results (preferred - already mapped to features)
+        if (grouping_data_path) {
+          if (!existsSync(grouping_data_path)) {
+            throw new Error(`Grouping data file not found: ${grouping_data_path}`);
+          }
+          
+          sourceFile = grouping_data_path;
+          console.error(`[Export] Using grouping data from ${grouping_data_path}`);
+          const groupingContent = await readFile(grouping_data_path, "utf-8");
+          const groupingData = JSON.parse(groupingContent);
+          
+          // Import the export function for grouping data
+          const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
+          result = await exportGroupingToPMTool(groupingData, pmToolConfig);
+          
+        } else {
+          // Option 2: Export from classification results (requires feature extraction)
+          
+          // Get documentation URLs from config
+          if (!config.pmIntegration.documentation_urls || config.pmIntegration.documentation_urls.length === 0) {
+            throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in environment variables, or use grouping_data_path instead.");
+          }
+          
+          // Determine classified data path
+          let classifiedPath = classified_data_path;
+          if (!classifiedPath) {
+            if (!actualChannelId) {
+              throw new Error("Channel ID is required. Provide classified_data_path or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
+            }
+            classifiedPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
+          }
+          
+          sourceFile = classifiedPath;
+
+          // Run export workflow
+          result = await runExportWorkflow(
+            config.pmIntegration.documentation_urls,
+            classifiedPath,
+            pmToolConfig
+          );
+        }
 
         // Save export results to file
         await mkdir(resultsDir, { recursive: true });
@@ -1778,7 +1847,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           features_mapped: result.features_mapped,
           issues_exported: result.issues_exported,
           errors: result.errors,
-          source_file: classifiedPath,
+          source_file: sourceFile,
         };
         
         await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
@@ -1887,6 +1956,481 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Validation failed:", error);
         throw new Error(`Validation failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "suggest_grouping": {
+      const { 
+        channel_id, 
+        min_similarity = 60, 
+        max_groups = 50, 
+        re_classify = false,
+        semantic_only = false,
+      } = args as {
+        channel_id?: string;
+        min_similarity?: number;
+        max_groups?: number;
+        re_classify?: boolean;
+        semantic_only?: boolean;
+      };
+
+      try {
+        const config = getConfig();
+        const actualChannelId = channel_id || config.discord.defaultChannelId;
+
+        if (!actualChannelId) {
+          throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID.");
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error("OPENAI_API_KEY is required for grouping.");
+        }
+
+        const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
+        const history = await loadClassificationHistory(resultsDir);
+        const existingGroupStats = getGroupingStats(history);
+        
+        console.error(`[Grouping] Existing groups: ${existingGroupStats.totalGroups} (${existingGroupStats.exportedGroups} exported, ${existingGroupStats.pendingGroups} pending)`);
+
+        // ============================================================
+        // STEP 1: Check for existing classification results
+        // ============================================================
+        let classificationResults: ClassificationResults | null = null;
+        
+        // Find classification file for this channel
+        const classificationFiles = await readdir(resultsDir).catch(() => []);
+        const classificationFile = classificationFiles
+          .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+          .sort()
+          .reverse()[0]; // Most recent
+        
+        if (classificationFile && !semantic_only) {
+          const classificationPath = join(resultsDir, classificationFile);
+          const classificationContent = await readFile(classificationPath, "utf-8");
+          const parsed = JSON.parse(classificationContent) as ClassificationResults;
+          
+          // Only use if it has actual data
+          if (parsed.classified_threads && parsed.classified_threads.length > 0) {
+            classificationResults = parsed;
+            console.error(`[Grouping] Found classification results: ${parsed.classified_threads.length} threads in ${classificationFile}`);
+          }
+        }
+
+        // ============================================================
+        // STEP 2: If no classification or re_classify, run classification first
+        // ============================================================
+        if (!classificationResults || re_classify) {
+          if (semantic_only) {
+            console.error(`[Grouping] semantic_only=true, skipping classification`);
+          } else {
+            console.error(`[Grouping] ${re_classify ? 'Re-classifying' : 'No classification found'}. Running 1-to-1 classification first...`);
+            
+            // Load caches
+            const discordCachePath = await findDiscordCacheFile(actualChannelId);
+            if (!discordCachePath) {
+              throw new Error(`No Discord cache found for channel ${actualChannelId}. Run fetch_discord_messages first.`);
+            }
+            const discordCache = await loadDiscordCache(discordCachePath);
+            
+            const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
+            if (!existsSync(issuesCachePath)) {
+              throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
+            }
+            const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
+            const issuesCache = JSON.parse(issuesCacheContent) as IssuesCache;
+            
+            // Organize Discord messages by thread
+            const allMessages = getAllMessagesFromCache(discordCache);
+            const { threads, mainMessages } = organizeMessagesByThread(allMessages);
+            
+            // Convert to classifier format
+            const classifierMessages: DiscordMessage[] = [];
+            
+            // Add threads
+            for (const [threadId, threadData] of Object.entries(threads)) {
+              const threadMsgs = threadData.messages;
+              if (!threadMsgs || threadMsgs.length === 0) continue;
+              const firstMsg = threadMsgs[0];
+              const combinedContent = threadMsgs.map(m => m.content).join('\n');
+              
+              classifierMessages.push({
+                id: firstMsg.id,
+                content: combinedContent,
+                author: firstMsg.author.username, // Convert author object to username string
+                timestamp: firstMsg.created_at,
+                url: firstMsg.url,
+                threadId: threadId,
+                threadName: threadData.thread_name || firstMsg.thread?.name,
+                messageIds: threadMsgs.map(m => m.id),
+              } as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] });
+            }
+            
+            // Add standalone messages
+            for (const msg of mainMessages) {
+              classifierMessages.push({
+                id: msg.id,
+                content: msg.content,
+                author: msg.author.username, // Convert author object to username string
+                timestamp: msg.created_at,
+                url: msg.url,
+              });
+            }
+            
+            console.error(`[Grouping] Classifying ${classifierMessages.length} threads/messages...`);
+            
+            // Run classification
+            const classified = await classifyMessagesWithCache(
+              classifierMessages, 
+              issuesCache.issues, 
+              min_similarity, // Use same threshold for classification
+              true // Use semantic
+            );
+            
+            // Build classification results
+            const classifiedThreads = classified.map((classifiedMsg) => {
+              const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
+              
+              return {
+                thread: {
+                  thread_id: msg.threadId || classifiedMsg.message.id,
+                  thread_name: msg.threadName,
+                  message_count: msg.messageIds?.length || 1,
+                  first_message_url: classifiedMsg.message.url,
+                  first_message_author: classifiedMsg.message.author,
+                  first_message_timestamp: classifiedMsg.message.timestamp,
+                  classified_status: "completed",
+                },
+                issues: classifiedMsg.relatedIssues.map((match) => ({
+                  number: match.issue.number,
+                  title: match.issue.title,
+                  state: match.issue.state,
+                  url: match.issue.html_url,
+                  similarity_score: match.similarityScore,
+                  labels: match.issue.labels.map((l) => l.name),
+                  author: match.issue.user.login,
+                })),
+              };
+            });
+            
+            classificationResults = {
+              channel_id: actualChannelId,
+              classified_threads: classifiedThreads,
+            };
+            
+            // Save classification results
+            const classificationOutputPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
+            await writeFile(classificationOutputPath, JSON.stringify({
+              channel_id: actualChannelId,
+              channel_name: "auto-classified",
+              analysis_date: new Date().toISOString(),
+              summary: {
+                total_messages: classifierMessages.length,
+                classified_count: classified.length,
+                thread_count: classifiedThreads.length,
+                coverage_percentage: classifierMessages.length > 0 ? (classified.length / classifierMessages.length) * 100 : 0,
+                newly_classified: classified.length,
+              },
+              classified_threads: classifiedThreads,
+            }, null, 2), "utf-8");
+            
+            console.error(`[Grouping] Classification complete: ${classifiedThreads.length} threads. Saved to ${classificationOutputPath}`);
+          }
+        }
+
+        // ============================================================
+        // STEP 3: Group by classification results (issue-based) OR semantic
+        // ============================================================
+        let outputData: any;
+        
+        if (classificationResults && !semantic_only) {
+          // Issue-based grouping: Group threads by matched GitHub issues
+          console.error(`[Grouping] Grouping by matched GitHub issues...`);
+          
+          const groupResult = groupByClassificationResults(classificationResults, {
+            minSimilarity: min_similarity,
+            maxGroups: max_groups,
+            topIssuesPerThread: 3,
+          });
+          
+          // Save groups to history
+          for (const group of groupResult.groups) {
+            addGroup(history, {
+              group_id: group.id,
+              suggested_title: group.issue.title,
+              similarity: group.avgSimilarity / 100, // Normalize to 0-1
+              is_cross_cutting: false,
+              affects_features: [],
+              signal_ids: group.threads.map(t => `discord:${t.thread_id}`),
+              github_issue: group.issue.number,
+            });
+          }
+          
+          await saveClassificationHistory(history, resultsDir);
+          
+          // Format output
+          const formattedGroups = groupResult.groups.map(group => ({
+            id: group.id,
+            github_issue: {
+              number: group.issue.number,
+              title: group.issue.title,
+              url: group.issue.url,
+              state: group.issue.state,
+              labels: group.issue.labels,
+            },
+            avg_similarity: Math.round(group.avgSimilarity * 10) / 10,
+            thread_count: group.threads.length,
+            threads: group.threads.map(t => ({
+              thread_id: t.thread_id,
+              thread_name: t.thread_name,
+              similarity_score: Math.round(t.similarity_score * 10) / 10,
+              url: t.url,
+              author: t.author,
+            })),
+          }));
+          
+          // Save results to file
+          await mkdir(resultsDir, { recursive: true });
+          const outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+          
+          outputData = {
+            timestamp: new Date().toISOString(),
+            channel_id: actualChannelId,
+            grouping_method: "issue-based",
+            options: { min_similarity, max_groups },
+            stats: groupResult.stats,
+            groups: formattedGroups,
+          };
+          
+          await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          
+          const updatedGroupStats = getGroupingStats(history);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  grouping_method: "issue-based",
+                  description: "Discord threads grouped by their matched GitHub issues. Threads that matched the same issue are in the same group.",
+                  stats: {
+                    ...groupResult.stats,
+                    total_groups_in_history: updatedGroupStats.totalGroups,
+                    exported_groups: updatedGroupStats.exportedGroups,
+                    pending_groups: updatedGroupStats.pendingGroups,
+                  },
+                  groups_count: formattedGroups.length,
+                  groups: formattedGroups,
+                  output_file: outputPath,
+                  message: `Created ${formattedGroups.length} groups from ${groupResult.stats.totalThreads} Discord threads. Each group is linked to a GitHub issue. Results saved to ${outputPath}`,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          // Fallback: Pure semantic grouping (no classification results)
+          console.error(`[Grouping] Using pure semantic similarity grouping...`);
+          
+          // Load data for semantic grouping
+          const discordCachePath = await findDiscordCacheFile(actualChannelId);
+          if (!discordCachePath) {
+            throw new Error(`No Discord cache found for channel ${actualChannelId}. Run fetch_discord_messages first.`);
+          }
+          const discordCache = await loadDiscordCache(discordCachePath);
+          
+          const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
+          if (!existsSync(issuesCachePath)) {
+            throw new Error("No GitHub issues cache found. Run fetch_github_issues first.");
+          }
+          const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
+          const issuesCache = JSON.parse(issuesCacheContent) as IssuesCache;
+          
+          // Convert to Signal format
+          const signals: Signal[] = [];
+          
+          for (const [threadId, threadData] of Object.entries(discordCache.threads || {})) {
+            const messages = threadData.messages;
+            if (!messages || messages.length === 0) continue;
+            
+            const firstMsg = messages[0];
+            const lastMsg = messages[messages.length - 1];
+            const allContent = messages.map(m => m.content).join("\n");
+            const guildId = firstMsg.guild_id || "";
+            
+            signals.push({
+              source: "discord",
+              sourceId: threadId,
+              permalink: firstMsg.url || `https://discord.com/channels/${guildId}/${actualChannelId}/${firstMsg.id}`,
+              title: threadData.thread_name || firstMsg.thread?.name || undefined,
+              body: allContent,
+              createdAt: firstMsg.created_at,
+              updatedAt: lastMsg.created_at,
+              metadata: { messageCount: messages.length },
+            });
+          }
+          
+          for (const msg of discordCache.main_messages || []) {
+            const guildId = msg.guild_id || "";
+            signals.push({
+              source: "discord",
+              sourceId: msg.id,
+              permalink: msg.url || `https://discord.com/channels/${guildId}/${actualChannelId}/${msg.id}`,
+              title: undefined,
+              body: msg.content,
+              createdAt: msg.created_at,
+              updatedAt: msg.edited_at || msg.created_at,
+              metadata: {},
+            });
+          }
+          
+          for (const issue of issuesCache.issues) {
+            signals.push({
+              source: "github",
+              sourceId: issue.number.toString(),
+              permalink: issue.html_url,
+              title: issue.title,
+              body: issue.body || "",
+              createdAt: issue.created_at,
+              updatedAt: issue.updated_at,
+              metadata: { 
+                state: issue.state,
+                labels: issue.labels.map(l => l.name),
+              },
+            });
+          }
+          
+          // Filter already-grouped unless re_classify
+          const signalsToGroup = re_classify ? signals : filterUngroupedSignals(signals, history);
+          
+          if (signalsToGroup.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    success: true,
+                    message: "All signals are already grouped. Use re_classify=true to re-process.",
+                    stats: existingGroupStats,
+                    groups_count: 0,
+                  }, null, 2),
+                },
+              ],
+            };
+          }
+          
+          // Extract features
+          let features: Feature[] = [];
+          const docUrls = config.pmIntegration?.documentation_urls;
+          if (docUrls && docUrls.length > 0) {
+            const docs = await fetchMultipleDocumentation(docUrls);
+            if (docs.length > 0) {
+              const extractedFeatures = await extractFeaturesFromDocumentation(docs);
+              features = extractedFeatures.map(f => ({
+                id: f.id,
+                name: f.name,
+                description: f.description,
+              }));
+            }
+          }
+          
+          if (features.length === 0) {
+            features = [{
+              id: "general",
+              name: "General",
+              description: "General issues and discussions",
+            }];
+          }
+          
+          // Run semantic grouping
+          const result = await groupSignalsSemantic(signalsToGroup, features, {
+            minSimilarity: min_similarity / 100, // Convert to 0-1 scale
+            maxGroups: max_groups,
+          });
+          
+          // Save groups to history
+          for (const group of result.groups) {
+            addGroup(history, {
+              group_id: group.id,
+              suggested_title: group.suggestedTitle,
+              similarity: group.similarity,
+              is_cross_cutting: group.isCrossCutting,
+              affects_features: group.affectsFeatures,
+              signal_ids: group.signals.map(s => `${s.source}:${s.sourceId}`),
+            });
+          }
+          
+          await saveClassificationHistory(history, resultsDir);
+          
+          // Format output
+          const formattedGroups = result.groups.map(group => ({
+            id: group.id,
+            suggested_title: group.suggestedTitle,
+            similarity: Math.round(group.similarity * 100) / 100,
+            is_cross_cutting: group.isCrossCutting,
+            affects_features: group.affectsFeatures.map(fid => {
+              const feature = features.find(f => f.id === fid);
+              return feature ? { id: fid, name: feature.name } : { id: fid, name: fid };
+            }),
+            signals: group.signals.map(s => ({
+              source: s.source,
+              id: s.sourceId,
+              title: s.title || s.body.substring(0, 50) + "...",
+              url: s.permalink,
+            })),
+            canonical_issue: group.canonicalIssue ? {
+              source: group.canonicalIssue.source,
+              id: group.canonicalIssue.sourceId,
+              title: group.canonicalIssue.title,
+              url: group.canonicalIssue.permalink,
+            } : null,
+          }));
+          
+          await mkdir(resultsDir, { recursive: true });
+          const outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
+          
+          outputData = {
+            timestamp: new Date().toISOString(),
+            channel_id: actualChannelId,
+            grouping_method: "semantic",
+            options: { min_similarity, max_groups },
+            stats: result.stats,
+            features: features.map(f => ({ id: f.id, name: f.name })),
+            groups: formattedGroups,
+            ungrouped_count: result.ungroupedSignals.length,
+          };
+          
+          await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          
+          const updatedGroupStats = getGroupingStats(history);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  grouping_method: "semantic",
+                  description: "Signals grouped by semantic similarity. Use without semantic_only=true to get issue-based grouping.",
+                  stats: {
+                    ...result.stats,
+                    total_groups_in_history: updatedGroupStats.totalGroups,
+                    exported_groups: updatedGroupStats.exportedGroups,
+                    pending_groups: updatedGroupStats.pendingGroups,
+                  },
+                  groups_count: formattedGroups.length,
+                  cross_cutting_count: formattedGroups.filter(g => g.is_cross_cutting).length,
+                  features_used: features.map(f => f.name),
+                  groups: formattedGroups,
+                  output_file: outputPath,
+                  message: `Found ${formattedGroups.length} groups (${formattedGroups.filter(g => g.is_cross_cutting).length} cross-cutting). Results saved to ${outputPath}`,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+      } catch (error) {
+        logError("Grouping failed:", error);
+        throw new Error(`Grouping failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
