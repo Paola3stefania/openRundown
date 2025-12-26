@@ -38,12 +38,14 @@ export interface PMToolIssue {
   description: string;
   feature_id?: string;
   feature_name?: string;
+  project_id?: string; // Linear project ID (for feature grouping)
   source: "discord" | "github";
   source_url: string;
   source_id: string;
   labels?: string[];
   priority?: "high" | "medium" | "low";
   metadata?: Record<string, any>;
+  linear_issue_id?: string; // Store Linear issue ID for mapping
 }
 
 export interface PMToolConfig {

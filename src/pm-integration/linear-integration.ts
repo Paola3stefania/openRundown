@@ -24,7 +24,7 @@ export class LinearIntegration extends BasePMTool {
     this.apiUrl = config.api_url || "https://api.linear.app/graphql";
   }
 
-  async createIssue(issue: PMToolIssue): Promise<{ id: string; url: string }> {
+  async createIssue(issue: PMToolIssue): Promise<{ id: string; identifier?: string; url: string }> {
     const query = `
       mutation CreateIssue($input: IssueCreateInput!) {
         issueCreate(input: $input) {
@@ -46,8 +46,8 @@ export class LinearIntegration extends BasePMTool {
         description: this.formatDescription(issue),
         labelIds: this.mapLabels(issue.labels || []),
         priority: this.mapPriority(issue.priority),
-        ...(issue.feature_id && {
-          // Custom fields can be added here if Linear workspace has custom fields
+        ...(issue.project_id && {
+          projectId: issue.project_id, // Link to Linear project (feature)
         }),
       },
     };
@@ -62,6 +62,7 @@ export class LinearIntegration extends BasePMTool {
     
     return {
       id: createdIssue.id,
+      identifier: createdIssue.identifier, // e.g., "LIN-123"
       url: createdIssue.url,
     };
   }
@@ -96,9 +97,49 @@ export class LinearIntegration extends BasePMTool {
 
   async findIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null> {
     // Linear doesn't have a built-in way to search by custom source ID
-    // We'll need to store the mapping or use issue comments/metadata
-    // For now, return null - this should be enhanced with a mapping table
+    // We maintain a mapping table externally (in export results or mapping file)
+    // This method should be called with the stored linear_issue_id from mapping
+    // For now, return null - caller should use stored mapping from previous exports
     return null;
+  }
+  
+  /**
+   * Get Linear issue by ID (for reading status/updates)
+   * Useful for back-propagating Linear state to internal tracking
+   */
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; state: string } | null> {
+    const query = `
+      query GetIssue($id: String!) {
+        issue(id: $id) {
+          id
+          identifier
+          url
+          title
+          state {
+            name
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest(query, { id: issueId });
+      
+      if (response.data?.issue) {
+        return {
+          id: response.data.issue.id,
+          identifier: response.data.issue.identifier,
+          url: response.data.issue.url,
+          title: response.data.issue.title,
+          state: response.data.issue.state?.name || "Unknown",
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      logError(`Failed to get Linear issue ${issueId}:`, error);
+      return null;
+    }
   }
 
   private async graphqlRequest(query: string, variables: any): Promise<any> {
@@ -124,19 +165,41 @@ export class LinearIntegration extends BasePMTool {
   private formatDescription(issue: PMToolIssue): string {
     let description = issue.description || "";
     
-    // Add source information
+    // Add source links section
     description += `\n\n---\n\n`;
-    description += `**Source:** ${issue.source === "discord" ? "💬 Discord" : "🐙 GitHub"}\n`;
-    description += `**Link:** ${issue.source_url}\n`;
+    description += `## Sources\n\n`;
     
-    if (issue.feature_name) {
-      description += `**Related Feature:** ${issue.feature_name}\n`;
+    // Discord/Slack sources
+    if (issue.source === "discord" && issue.source_url) {
+      description += `**Discord:** [View discussion](${issue.source_url})\n`;
     }
     
-    if (issue.metadata) {
-      description += `\n**Metadata:**\n`;
-      for (const [key, value] of Object.entries(issue.metadata)) {
-        description += `- ${key}: ${value}\n`;
+    // GitHub issues (for context only - Linear PR linking happens via Linear issue ID)
+    if (issue.metadata?.github_issues) {
+      const githubIssues = issue.metadata.github_issues as Array<{
+        issue_number: number;
+        issue_url: string;
+        issue_title: string;
+      }>;
+      if (githubIssues.length > 0) {
+        description += `\n**Related GitHub Issues (for context):**\n`;
+        for (const ghIssue of githubIssues) {
+          description += `- [#${ghIssue.issue_number} ${ghIssue.issue_title}](${ghIssue.issue_url})\n`;
+        }
+      }
+    }
+    
+    // Discord threads (if multiple)
+    if (issue.metadata?.discord_threads) {
+      const discordThreads = issue.metadata.discord_threads as Array<{
+        thread_name: string;
+        thread_url: string;
+      }>;
+      if (discordThreads.length > 1) {
+        description += `\n**Additional Discord Discussions:**\n`;
+        for (const thread of discordThreads) {
+          description += `- [${thread.thread_name}](${thread.thread_url})\n`;
+        }
       }
     }
 

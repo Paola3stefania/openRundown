@@ -9,7 +9,7 @@ export interface IPMTool {
   /**
    * Create an issue in the PM tool
    */
-  createIssue(issue: PMToolIssue): Promise<{ id: string; url: string }>;
+  createIssue(issue: PMToolIssue): Promise<{ id: string; identifier?: string; url: string }>;
 
   /**
    * Update an existing issue
@@ -18,8 +18,14 @@ export interface IPMTool {
 
   /**
    * Check if an issue already exists (by source ID)
+   * Note: Most PM tools don't support this natively - use stored mapping instead
    */
   findIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null>;
+
+  /**
+   * Get issue details by ID (for reading status/updates)
+   */
+  getIssue?(issueId: string): Promise<{ id: string; identifier?: string; url: string; title: string; state: string } | null>;
 
   /**
    * Export multiple issues
@@ -37,7 +43,7 @@ export abstract class BasePMTool implements IPMTool {
     this.config = config;
   }
 
-  abstract createIssue(issue: PMToolIssue): Promise<{ id: string; url: string }>;
+  abstract createIssue(issue: PMToolIssue): Promise<{ id: string; identifier?: string; url: string }>;
   abstract updateIssue(issueId: string, updates: Partial<PMToolIssue>): Promise<void>;
   abstract findIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null>;
 
@@ -72,6 +78,11 @@ export abstract class BasePMTool implements IPMTool {
           const created = await this.createIssue(issue);
           result.created_issues++;
           result.issue_urls?.push(created.url);
+          
+          // Store Linear issue ID in the issue metadata for mapping
+          if (created.identifier) {
+            issue.linear_issue_id = created.id;
+          }
         }
       } catch (error) {
         result.errors?.push({

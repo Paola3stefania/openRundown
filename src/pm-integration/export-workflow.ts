@@ -117,6 +117,7 @@ export async function runExportWorkflow(
 
 /**
  * Convert feature mappings to PM tool issues
+ * Each mapping represents one problem/request that may relate to multiple GitHub issues and Discord threads
  */
 function convertToPMToolIssues(mappings: FeatureMapping[]): PMToolIssue[] {
   const issues: PMToolIssue[] = [];
@@ -124,43 +125,92 @@ function convertToPMToolIssues(mappings: FeatureMapping[]): PMToolIssue[] {
   for (const mapping of mappings) {
     const feature = mapping.feature;
 
-    // Create a summary issue for the feature with all related discussions
-    const description = [
-      `## ${feature.name}`,
-      feature.description,
-      "",
-      "### Related Discussions",
-      "",
-      `**Discord Threads (${mapping.discord_threads.length}):**`,
-      ...mapping.discord_threads.map(thread => 
-        `- [${thread.thread_name}](${thread.first_message_url}) (${thread.message_count} messages, ${thread.similarity_score.toFixed(1)}% match)`
-      ),
-      "",
-      `**GitHub Issues (${mapping.github_issues.length}):**`,
-      ...mapping.github_issues.map(issue =>
-        `- [#${issue.issue_number} ${issue.issue_title}](${issue.issue_url}) (${issue.state}, ${issue.similarity_score.toFixed(1)}% match)`
-      ),
-    ].join("\n");
+    // Generate canonical title from grouped discussions
+    // For now, use feature name - could be enhanced with LLM summarization
+    const title = generateIssueTitle(mapping);
+
+    // Build description with problem summary and sources
+    const description = buildIssueDescription(mapping);
 
     issues.push({
-      title: `Feature: ${feature.name}`,
+      title,
       description,
       feature_id: feature.id,
       feature_name: feature.name,
-      source: "discord", // Mixed source
-      source_url: mapping.discord_threads[0]?.first_message_url || "",
-      source_id: `feature-${feature.id}`,
+      project_id: feature.id, // Linear project ID (will be created/linked per feature)
+      source: mapping.discord_threads.length > 0 ? "discord" : "github",
+      source_url: mapping.discord_threads[0]?.first_message_url || mapping.github_issues[0]?.issue_url || "",
+      source_id: generateSourceId(mapping),
       labels: feature.category ? [feature.category] : [],
       priority: feature.priority,
       metadata: {
         total_mentions: mapping.total_mentions,
-        discord_threads_count: mapping.discord_threads.length,
-        github_issues_count: mapping.github_issues.length,
+        discord_threads: mapping.discord_threads.map(t => ({
+          thread_name: t.thread_name,
+          thread_url: t.first_message_url,
+        })),
+        github_issues: mapping.github_issues.map(i => ({
+          issue_number: i.issue_number,
+          issue_url: i.issue_url,
+          issue_title: i.issue_title,
+        })),
         last_mentioned: mapping.last_mentioned,
       },
     });
   }
 
   return issues;
+}
+
+/**
+ * Generate canonical title for grouped issue
+ * TODO: Could use LLM to summarize multiple discussions into one title
+ */
+function generateIssueTitle(mapping: FeatureMapping): string {
+  // For now, use the most recent GitHub issue title if available
+  // Otherwise use first Discord thread name
+  if (mapping.github_issues.length > 0) {
+    return mapping.github_issues[0].issue_title;
+  }
+  if (mapping.discord_threads.length > 0) {
+    return mapping.discord_threads[0].thread_name;
+  }
+  return `Issue in ${mapping.feature.name}`;
+}
+
+/**
+ * Build issue description with problem summary and sources
+ */
+function buildIssueDescription(mapping: FeatureMapping): string {
+  const parts: string[] = [];
+  
+  // Problem description (could be enhanced with LLM summarization)
+  parts.push("## Problem Description");
+  parts.push(mapping.feature.description);
+  parts.push("");
+
+  // Sources section will be added by LinearIntegration.formatDescription()
+  // This is just the base description
+  
+  return parts.join("\n");
+}
+
+/**
+ * Generate unique source ID for this grouped issue
+ * Used for tracking and avoiding duplicates
+ */
+function generateSourceId(mapping: FeatureMapping): string {
+  // Combine feature ID with hash of related issue/thread IDs
+  const relatedIds = [
+    ...mapping.github_issues.map(i => `gh-${i.issue_number}`),
+    ...mapping.discord_threads.map(t => `discord-${t.thread_id}`),
+  ].sort().join("-");
+  
+  // Create deterministic hash (simple hash for now)
+  const hash = relatedIds.split("").reduce((acc, char) => {
+    return ((acc << 5) - acc) + char.charCodeAt(0);
+  }, 0).toString(36);
+  
+  return `feature-${mapping.feature.id}-${hash}`;
 }
 
