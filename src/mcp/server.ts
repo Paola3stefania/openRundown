@@ -38,7 +38,7 @@ import {
 import { join } from "path";
 import { existsSync, writeFileSync, mkdirSync } from "fs";
 import { writeFile, mkdir, readdir } from "fs/promises";
-import { log, logError } from "./logger.js";
+import { logError } from "./logger.js";
 import { runExportWorkflow } from "../export/workflow.js";
 import type { PMToolConfig } from "../export/types.js";
 import { createPMTool } from "../export/factory.js";
@@ -1286,8 +1286,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const batch = discordMessages.slice(i, i + BATCH_SIZE);
         const batchEnd = Math.min(i + BATCH_SIZE, discordMessages.length);
 
-        log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(discordMessages.length / BATCH_SIZE)} (${i + 1}-${batchEnd} of ${discordMessages.length})...`);
-
         // Mark batch threads/messages as "classifying"
         batch.forEach((msg) => {
           const threadMsg = msg as DiscordMessage & { threadId?: string; messageIds?: string[] };
@@ -1357,7 +1355,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Save progress after each batch
           await saveClassificationHistory(updatedHistory, resultsDir);
-          log(`  Batch complete: ${batchClassified.length} messages classified. Progress saved.`);
 
         } catch (error) {
           // Mark batch threads/messages as failed if classification errored
@@ -1476,7 +1473,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       try {
         // Step 1: Sync Discord messages (incremental)
-        log("Step 1/3: Syncing Discord messages (incremental)...");
         // Note: Full Discord sync requires the fetch_discord_messages tool
         // For now, we'll check if cache exists and report status
         const discordCachePath = await findDiscordCacheFile(actualChannelId);
@@ -1504,10 +1500,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           });
         }
-        log(`  Discord: ${discordMessageCount} messages in cache`);
 
         // Step 2: Sync GitHub issues (incremental)
-        log("Step 2/3: Syncing GitHub issues (incremental)...");
         const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
         let existingIssuesCache: IssuesCache | null = null;
         let sinceDate: string | undefined = undefined;
@@ -1557,7 +1551,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             new_updated: newIssues.length,
           },
         });
-        log(`  GitHub sync complete: ${issuesCacheData.total_count} issues cached (${newIssues.length} new/updated)`);
 
         // Step 3: Return summary with instruction to classify
         results.summary = {
@@ -1655,7 +1648,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         // Run export workflow
-        log(`Starting export workflow to ${pmToolConfig.type}...`);
         const result = await runExportWorkflow(
           config.pmIntegration.documentation_urls,
           classifiedPath,
@@ -1718,7 +1710,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("Linear integration does not support listing teams.");
         }
 
-        log("Fetching Linear teams...");
         const teams = await linearTool.listTeams();
 
         return {
