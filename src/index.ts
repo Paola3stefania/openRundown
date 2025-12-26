@@ -100,7 +100,7 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 // Create MCP server
 const mcpServer = new McpServer(
   {
-  name: "discord-mcp",
+  name: "unmute-mcp",
   version: "1.0.0",
   },
   {
@@ -1780,7 +1780,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
-  log("Discord MCP server started, connecting to Discord...");
+  log("UNMute MCP server started, connecting to Discord...");
 
   // Connect to Discord in the background (non-blocking)
   discord.login(DISCORD_TOKEN).catch((error) => {

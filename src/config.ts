@@ -1,5 +1,5 @@
 /**
- * Configuration for Discord MCP Server
+ * Configuration for UNMute MCP Server
  * 
  * Set these via environment variables or update the defaults below.
  */
