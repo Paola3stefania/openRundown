@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -31,7 +31,6 @@ import { loadDiscordCache, getAllMessagesFromCache, getMostRecentMessageDate, me
 import { loadClassificationHistory, saveClassificationHistory, filterUnclassifiedMessages, addMessageClassification, updateThreadStatus, getThreadStatus, migrateStandaloneToThread, type ClassificationHistory } from "./classification-history.js";
 import { getConfig } from "./config.js";
 import {
-  classifyMessages,
   classifyMessagesWithCache,
   type DiscordMessage,
   type ClassifiedMessage,
@@ -66,7 +65,6 @@ let discordReady = false;
 
 discord.once("clientReady", () => {
   discordReady = true;
-  log(`Discord bot logged in as ${discord.user?.tag}`);
 });
 
 /**
@@ -100,7 +98,7 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 }
 
 // Create MCP server
-const server = new Server(
+const mcpServer = new McpServer(
   {
   name: "discord-mcp",
   version: "1.0.0",
@@ -368,12 +366,12 @@ const tools: Tool[] = [
 ];
 
 // Handle list tools request
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
+mcpServer.server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools,
 }));
 
 // Handle call tool request
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
     if (!discordReady) {
@@ -1254,6 +1252,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      // If no cache available, fetch all issues from API
+      if (!issuesUseCache) {
+        const githubToken = process.env.GITHUB_TOKEN;
+        if (githubToken) {
+          issues = await fetchAllGitHubIssues(githubToken, true);
+        }
+      }
+
       // Update thread status to "classifying" before we start
       const updatedHistory = { ...classificationHistory };
       if (!updatedHistory.threads) {
@@ -1294,13 +1300,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         try {
           // Classify batch
-          let batchClassified: ClassifiedMessage[];
-          if (issuesUseCache) {
-            batchClassified = await classifyMessagesWithCache(batch, issues, min_similarity, useSemantic);
-          } else {
-            const githubToken = process.env.GITHUB_TOKEN;
-            batchClassified = await classifyMessages(batch, githubToken, min_similarity);
-          }
+          const batchClassified = await classifyMessagesWithCache(batch, issues, min_similarity, useSemantic);
 
           // Update classification history with batch results
           batchClassified.forEach((classifiedMsg) => {
@@ -1778,7 +1778,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   // Start MCP server FIRST so Cursor can communicate with it
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await mcpServer.connect(transport);
 
   log("Discord MCP server started, connecting to Discord...");
 
