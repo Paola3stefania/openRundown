@@ -64,7 +64,7 @@ const discord = new Client({
 
 let discordReady = false;
 
-discord.once("ready", () => {
+discord.once("clientReady", () => {
   discordReady = true;
   log(`Discord bot logged in as ${discord.user?.tag}`);
 });
