@@ -165,4 +165,4 @@ See the `docs/` folder for detailed documentation:
 
 ## License
 
-[Your License Here]
+MIT License - see [LICENSE](LICENSE) for details.
