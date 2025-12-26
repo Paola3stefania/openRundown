@@ -4,7 +4,8 @@
  */
 
 import { log, logError, logWarn } from "../logger.js";
-import { DocumentationContent, ProductFeature } from "./types.js";
+import { ProductFeature } from "./types.js";
+import { DocumentationContent } from "./documentation-fetcher.js";
 
 /**
  * Extract product features from documentation using LLM

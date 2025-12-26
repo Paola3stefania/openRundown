@@ -22,7 +22,8 @@ export class JiraIntegration extends BasePMTool {
 
     this.apiKey = config.api_key;
     this.email = config.api_url; // Jira uses email + API key
-    this.projectId = config.project_id;
+    // TODO: Jira project ID configuration - for now use workspace_id as project key or require separate config
+    this.projectId = config.workspace_id; // Temporary: use workspace_id as project key for Jira
     
     // Jira API URL format: https://{domain}.atlassian.net/rest/api/3
     if (!config.api_url || !config.api_url.includes("atlassian.net")) {
