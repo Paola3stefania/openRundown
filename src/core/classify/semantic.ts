@@ -4,7 +4,7 @@
  */
 
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
-import { log, logWarn } from "../../mcp/logger.js";
+import { logWarn } from "../../mcp/logger.js";
 
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 type Embedding = number[];
@@ -200,8 +200,6 @@ async function precomputeIssueEmbeddings(
   apiKey: string,
   embeddingCache: EmbeddingCache
 ): Promise<void> {
-  log(`Pre-computing embeddings for ${issues.length} issues...`);
-  
   // Process issues in smaller batches to respect rate limits
   const issueBatchSize = 50; // Process 50 issues at a time
   const delayMs = 200; // 200ms delay between batches
@@ -223,13 +221,8 @@ async function precomputeIssueEmbeddings(
     // Delay between batches to respect rate limits
     if (i + issueBatchSize < issues.length) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
-      if ((i + issueBatchSize) % 500 === 0) {
-        log(`  Progress: ${Math.min(i + issueBatchSize, issues.length)}/${issues.length} issues processed`);
-      }
     }
   }
-  
-  log(`  Completed: All ${issues.length} issue embeddings cached`);
 }
 
 /**
@@ -253,7 +246,6 @@ export async function classifyMessagesSemantic(
   await precomputeIssueEmbeddings(issues, apiKey, embeddingCache);
 
   // Now process messages - issue embeddings are already cached
-  log(`Classifying ${messages.length} messages...`);
   const messageBatchSize = 5; // Smaller batch for messages (since we compare with all issues)
   const delayMs = 300; // 300ms delay between message batches
 
@@ -313,13 +305,9 @@ export async function classifyMessagesSemantic(
     // Delay between batches to respect rate limits
     if (i + messageBatchSize < messages.length) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
-      if ((i + messageBatchSize) % 50 === 0) {
-        log(`  Progress: ${Math.min(i + messageBatchSize, messages.length)}/${messages.length} messages processed`);
-      }
     }
   }
 
-  log(`  Completed: ${results.length} messages matched with issues`);
   return results;
 }
 
