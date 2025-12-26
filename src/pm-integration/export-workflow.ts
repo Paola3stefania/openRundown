@@ -7,7 +7,7 @@ import { fetchDocumentation, fetchMultipleDocumentation } from "./documentation-
 import { extractFeaturesFromDocumentation } from "./feature-extractor.js";
 import { mapToFeatures } from "./feature-mapper.js";
 import { createPMTool, validatePMToolConfig } from "./pm-tool-factory.js";
-import { PMToolConfig, PMToolIssue, ProductFeature, FeatureMapping } from "./types.js";
+import { PMToolConfig, PMToolIssue, ProductFeature, FeatureMapping, ProjectMapping } from "./types.js";
 import { join } from "path";
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
@@ -50,6 +50,21 @@ export async function runExportWorkflow(
       throw new Error(validation.error || "Invalid PM tool configuration");
     }
 
+    // Step 1a: Validate Linear team (if using Linear)
+    // Auto-create UNMute team if not configured
+    if (pmToolConfig.type === "linear") {
+      const pmTool = createPMTool(pmToolConfig);
+      const linearTool = pmTool as any;
+      if (typeof linearTool.validateTeam === "function") {
+        // Create UNMute team if no team_id is configured
+        await linearTool.validateTeam(true, "UNMute");
+        // Update team_id if it was auto-created
+        if (linearTool.teamId && !pmToolConfig.team_id) {
+          pmToolConfig.team_id = linearTool.teamId;
+        }
+      }
+    }
+
     // Step 2: Extract features from documentation (or use existing)
     let features: ProductFeature[];
     
@@ -83,13 +98,43 @@ export async function runExportWorkflow(
     const featureMappings = await mapToFeatures(features, classifiedData);
     result.features_mapped = featureMappings.length;
 
-    // Step 5: Convert to PM tool issues
-    log("Converting to PM tool issues...");
-    const pmIssues = convertToPMToolIssues(featureMappings);
-
-    // Step 6: Export to PM tool
-    log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type}...`);
+    // Step 5: Create/ensure Linear Projects exist (for Linear only)
     const pmTool = createPMTool(pmToolConfig);
+    let projectMappings: ProjectMapping[] = [];
+    
+    if (pmToolConfig.type === "linear") {
+      log("Creating/ensuring Linear Projects for features...");
+      // Type assertion for Linear-specific method
+      const linearTool = pmTool as any;
+      
+      if (typeof linearTool.createOrGetProject === "function") {
+        for (const mapping of featureMappings) {
+          try {
+            const projectId = await linearTool.createOrGetProject(
+              mapping.feature.id,
+              mapping.feature.name,
+              mapping.feature.description
+            );
+            projectMappings.push({
+              feature_id: mapping.feature.id,
+              feature_name: mapping.feature.name,
+              linear_project_id: projectId,
+            });
+          } catch (error) {
+            logError(`Failed to create/get project for feature ${mapping.feature.name}:`, error);
+            // Continue with other features
+          }
+        }
+        log(`Created/verified ${projectMappings.length} Linear Projects`);
+      }
+    }
+
+    // Step 6: Convert to PM tool issues (with project IDs)
+    log("Converting to PM tool issues...");
+    const pmIssues = convertToPMToolIssues(featureMappings, projectMappings);
+
+    // Step 7: Export to PM tool
+    log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type}...`);
     const exportResult = await pmTool.exportIssues(pmIssues);
 
     result.success = true;
@@ -119,7 +164,7 @@ export async function runExportWorkflow(
  * Convert feature mappings to PM tool issues
  * Each mapping represents one problem/request that may relate to multiple GitHub issues and Discord threads
  */
-function convertToPMToolIssues(mappings: FeatureMapping[]): PMToolIssue[] {
+function convertToPMToolIssues(mappings: FeatureMapping[], projectMappings: ProjectMapping[] = []): PMToolIssue[] {
   const issues: PMToolIssue[] = [];
 
   for (const mapping of mappings) {
@@ -132,12 +177,16 @@ function convertToPMToolIssues(mappings: FeatureMapping[]): PMToolIssue[] {
     // Build description with problem summary and sources
     const description = buildIssueDescription(mapping);
 
+    // Find project ID for this feature
+    const projectMapping = projectMappings.find(pm => pm.feature_id === feature.id);
+    const projectId = projectMapping?.linear_project_id;
+
     issues.push({
       title,
       description,
       feature_id: feature.id,
       feature_name: feature.name,
-      project_id: feature.id, // Linear project ID (will be created/linked per feature)
+      project_id: projectId, // Linear project ID (link to feature project)
       source: mapping.discord_threads.length > 0 ? "discord" : "github",
       source_url: mapping.discord_threads[0]?.first_message_url || mapping.github_issues[0]?.issue_url || "",
       source_id: generateSourceId(mapping),

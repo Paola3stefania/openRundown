@@ -42,6 +42,7 @@ import { writeFile, mkdir, readdir } from "fs/promises";
 import { log, logError } from "./logger.js";
 import { runExportWorkflow } from "./pm-integration/export-workflow.js";
 import type { PMToolConfig } from "./pm-integration/types.js";
+import { createPMTool } from "./pm-integration/pm-tool-factory.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -343,6 +344,15 @@ const tools: Tool[] = [
           description: "Path to the classified Discord messages JSON file (defaults to latest classified file for default channel)",
         },
       },
+      required: [],
+    },
+  },
+  {
+    name: "list_linear_teams",
+    description: "List all Linear teams in the workspace. Useful for finding team IDs to use in PM_TOOL_TEAM_ID configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {},
       required: [],
     },
   },
@@ -1633,7 +1643,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           api_key: config.pmIntegration.pm_tool.api_key,
           api_url: config.pmIntegration.pm_tool.api_url,
           team_id: config.pmIntegration.pm_tool.team_id,
-          project_id: config.pmIntegration.pm_tool.project_id,
         };
 
         // Run export workflow
@@ -1664,6 +1673,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Export to PM tool failed:", error);
         throw new Error(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "list_linear_teams": {
+      try {
+        const config = getConfig();
+
+        // Check if PM tool is configured as Linear
+        if (!config.pmIntegration?.pm_tool) {
+          throw new Error("PM tool configuration not found. Set PM_TOOL_TYPE and PM_TOOL_API_KEY in environment variables.");
+        }
+
+        if (config.pmIntegration.pm_tool.type !== "linear") {
+          throw new Error(`PM tool is not Linear (current type: ${config.pmIntegration.pm_tool.type}). This tool only works with Linear.`);
+        }
+
+        if (!config.pmIntegration.pm_tool.api_key) {
+          throw new Error("Linear API key is required. Set PM_TOOL_API_KEY in environment variables.");
+        }
+
+        // Build PM tool configuration
+        const pmToolConfig: PMToolConfig = {
+          type: "linear",
+          api_key: config.pmIntegration.pm_tool.api_key,
+          api_url: config.pmIntegration.pm_tool.api_url,
+          team_id: config.pmIntegration.pm_tool.team_id,
+        };
+
+        // Create Linear integration and list teams
+        const pmTool = createPMTool(pmToolConfig);
+        const linearTool = pmTool as any;
+
+        if (typeof linearTool.listTeams !== "function") {
+          throw new Error("Linear integration does not support listing teams.");
+        }
+
+        log("Fetching Linear teams...");
+        const teams = await linearTool.listTeams();
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                teams: teams,
+                count: teams.length,
+                message: teams.length > 0 
+                  ? `Found ${teams.length} team(s). Use the 'id' field for PM_TOOL_TEAM_ID configuration.`
+                  : "No teams found in Linear workspace.",
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Failed to list Linear teams:", error);
+        throw new Error(`Failed to list Linear teams: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

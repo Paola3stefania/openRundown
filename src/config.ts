@@ -47,8 +47,7 @@ export interface Config {
       api_key?: string;
       api_url?: string;
       workspace_id?: string;
-      project_id?: string;
-      team_id?: string;
+      team_id?: string; // Linear team ID (projects are created automatically from features)
       board_id?: string;
     };
   };
@@ -96,7 +95,6 @@ export function getConfig(): Config {
             api_key: process.env.PM_TOOL_API_KEY,
             api_url: process.env.PM_TOOL_API_URL,
             workspace_id: process.env.PM_TOOL_WORKSPACE_ID,
-            project_id: process.env.PM_TOOL_PROJECT_ID,
             team_id: process.env.PM_TOOL_TEAM_ID,
             board_id: process.env.PM_TOOL_BOARD_ID,
           }

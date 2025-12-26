@@ -10,7 +10,8 @@ import { log, logError } from "../logger.js";
 export class LinearIntegration extends BasePMTool {
   private apiUrl: string;
   private apiKey: string;
-  private teamId?: string;
+  public teamId?: string; // Make accessible for updating after auto-creation
+  private projectCache: Map<string, string> = new Map(); // feature_id -> project_id
 
   constructor(config: PMToolConfig) {
     super(config);
@@ -95,6 +96,126 @@ export class LinearIntegration extends BasePMTool {
     }
   }
 
+  /**
+   * Create or get Linear Project for a feature
+   * Projects represent product features in Linear
+   */
+  async createOrGetProject(featureId: string, featureName: string, featureDescription?: string): Promise<string> {
+    // Check cache first
+    if (this.projectCache.has(featureId)) {
+      return this.projectCache.get(featureId)!;
+    }
+
+    // Try to find existing project by name
+    const existingProject = await this.findProjectByName(featureName);
+    if (existingProject) {
+      this.projectCache.set(featureId, existingProject.id);
+      return existingProject.id;
+    }
+
+    // Create new project
+    const query = `
+      mutation CreateProject($input: ProjectCreateInput!) {
+        projectCreate(input: $input) {
+          success
+          project {
+            id
+            name
+            url
+          }
+        }
+      }
+    `;
+
+    const variables = {
+      input: {
+        name: featureName,
+        description: featureDescription || `Project for ${featureName} feature`,
+        teamIds: this.teamId ? [this.teamId] : undefined,
+      },
+    };
+
+    try {
+      const response = await this.graphqlRequest(query, variables);
+      
+      if (!response.data?.projectCreate?.success) {
+        throw new Error(`Failed to create Linear project: ${JSON.stringify(response.errors)}`);
+      }
+
+      const project = response.data.projectCreate.project;
+      this.projectCache.set(featureId, project.id);
+      log(`Created Linear project: ${project.name} (${project.id})`);
+      
+      return project.id;
+    } catch (error) {
+      logError(`Failed to create Linear project for feature ${featureName}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Find Linear project by name
+   * Linear projects query requires teamId filter or workspace scope
+   */
+  private async findProjectByName(projectName: string): Promise<{ id: string; name: string } | null> {
+    // Linear API: projects query may require filters
+    // Try with team filter first, fallback to workspace if needed
+    const query = `
+      query GetProjects($teamId: String) {
+        projects(filter: { team: { id: { eq: $teamId } } }) {
+          nodes {
+            id
+            name
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest(query, { teamId: this.teamId || null });
+      
+      if (response.data?.projects?.nodes) {
+        const project = response.data.projects.nodes.find(
+          (p: { name: string }) => p.name.toLowerCase() === projectName.toLowerCase()
+        );
+        
+        if (project) {
+          return { id: project.id, name: project.name };
+        }
+      }
+      
+      // If no teamId or not found, try without filter (workspace scope)
+      if (this.teamId) {
+        const queryAll = `
+          query GetProjects {
+            projects {
+              nodes {
+                id
+                name
+              }
+            }
+          }
+        `;
+        
+        const responseAll = await this.graphqlRequest(queryAll, {});
+        if (responseAll.data?.projects?.nodes) {
+          const project = responseAll.data.projects.nodes.find(
+            (p: { name: string }) => p.name.toLowerCase() === projectName.toLowerCase()
+          );
+          
+          if (project) {
+            return { id: project.id, name: project.name };
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      logError(`Failed to find Linear project by name ${projectName}:`, error);
+      return null;
+    }
+  }
+
   async findIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null> {
     // Linear doesn't have a built-in way to search by custom source ID
     // We maintain a mapping table externally (in export results or mapping file)
@@ -103,6 +224,168 @@ export class LinearIntegration extends BasePMTool {
     return null;
   }
   
+  /**
+   * List all teams in the Linear workspace
+   * Useful for finding the correct team ID to use
+   */
+  async listTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
+    const query = `
+      query GetTeams {
+        teams {
+          nodes {
+            id
+            name
+            key
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest(query, {});
+      
+      if (response.data?.teams?.nodes) {
+        return response.data.teams.nodes.map((team: { id: string; name: string; key: string }) => ({
+          id: team.id,
+          name: team.name,
+          key: team.key,
+        }));
+      }
+      
+      return [];
+    } catch (error) {
+      logError("Failed to list Linear teams:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get team by ID or key
+   * Validates that the team exists and is accessible
+   */
+  async getTeam(teamIdOrKey: string): Promise<{ id: string; name: string; key: string } | null> {
+    const query = `
+      query GetTeam($id: String) {
+        team(id: $id) {
+          id
+          name
+          key
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest(query, { id: teamIdOrKey });
+      
+      if (response.data?.team) {
+        return {
+          id: response.data.team.id,
+          name: response.data.team.name,
+          key: response.data.team.key,
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      logError(`Failed to get Linear team ${teamIdOrKey}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Create or get Linear team by name/key
+   * If team doesn't exist, creates it automatically
+   */
+  async createOrGetTeam(teamName: string, teamKey?: string): Promise<string> {
+    // If teamKey not provided, generate from teamName (e.g., "UNMute" -> "UNMUTE")
+    const key = teamKey || teamName.toUpperCase().replace(/[^A-Z0-9]/g, "").substring(0, 20);
+    
+    // First, try to find existing team by name or key
+    const teams = await this.listTeams();
+    const existingTeam = teams.find(
+      t => t.name.toLowerCase() === teamName.toLowerCase() || t.key.toLowerCase() === key.toLowerCase()
+    );
+    
+    if (existingTeam) {
+      log(`Found existing Linear team: ${existingTeam.name} (${existingTeam.key})`);
+      return existingTeam.id;
+    }
+
+    // Team doesn't exist, create it
+    log(`Creating Linear team: ${teamName} (${key})`);
+    
+    const query = `
+      mutation CreateTeam($input: TeamCreateInput!) {
+        teamCreate(input: $input) {
+          success
+          team {
+            id
+            name
+            key
+          }
+        }
+      }
+    `;
+
+    const variables = {
+      input: {
+        name: teamName,
+        key: key,
+        description: `Auto-created team for ${teamName}`,
+      },
+    };
+
+    try {
+      const response = await this.graphqlRequest(query, variables);
+      
+      if (!response.data?.teamCreate?.success) {
+        throw new Error(`Failed to create Linear team: ${JSON.stringify(response.errors)}`);
+      }
+
+      const team = response.data.teamCreate.team;
+      log(`Created Linear team: ${team.name} (${team.key}) - ${team.id}`);
+      
+      return team.id;
+    } catch (error) {
+      logError(`Failed to create Linear team ${teamName}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate that the configured team ID exists
+   * If no team ID is configured, optionally create a default team
+   */
+  async validateTeam(createIfMissing: boolean = false, defaultTeamName: string = "UNMute"): Promise<boolean> {
+    if (!this.teamId) {
+      if (createIfMissing) {
+        log(`No team ID configured, creating default team: ${defaultTeamName}`);
+        try {
+          const teamId = await this.createOrGetTeam(defaultTeamName);
+          this.teamId = teamId;
+          log(`Using auto-created team: ${defaultTeamName} (${teamId})`);
+          return true;
+        } catch (error) {
+          logError(`Failed to create default team ${defaultTeamName}:`, error);
+          log("Projects and issues will be created without team association");
+          return false;
+        }
+      } else {
+        log("No team ID configured - projects and issues will be created without team association");
+        return false;
+      }
+    }
+
+    const team = await this.getTeam(this.teamId);
+    if (!team) {
+      logError(`Configured team ID ${this.teamId} not found or not accessible`);
+      return false;
+    }
+
+    log(`Validated Linear team: ${team.name} (${team.key})`);
+    return true;
+  }
+
   /**
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking

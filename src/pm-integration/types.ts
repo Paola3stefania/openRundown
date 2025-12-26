@@ -53,11 +53,16 @@ export interface PMToolConfig {
   api_key?: string;
   api_url?: string;
   workspace_id?: string;
-  project_id?: string;
-  team_id?: string;
+  team_id?: string; // Linear team ID (projects are created automatically from features)
   board_id?: string;
   // Custom fields mapping
   field_mappings?: Record<string, string>;
+}
+
+export interface ProjectMapping {
+  feature_id: string;
+  feature_name: string;
+  linear_project_id: string;
 }
 
 export interface ExportResult {
