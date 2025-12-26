@@ -163,6 +163,3 @@ See the `docs/` folder for detailed documentation:
 - `RATE_LIMIT_INFO.md`: GitHub API rate limits
 - `explain-permissions.md`: Discord bot permissions
 
-## License
-
-[Your License Here]
