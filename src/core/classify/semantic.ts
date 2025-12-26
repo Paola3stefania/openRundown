@@ -6,6 +6,11 @@
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
 
+// Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
+function logProgress(message: string) {
+  console.error(`[Progress] ${message}`);
+}
+
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 type Embedding = number[];
 
@@ -60,9 +65,24 @@ export async function createEmbedding(text: string, apiKey: string, retries = 3)
         
         // Handle rate limit errors with exponential backoff
         if (response.status === 429 && attempt < retries - 1) {
+          // Check if error message contains retry-after info
+          let delay = Math.pow(2, attempt) * 2000; // Exponential backoff: 2s, 4s, 8s
+          
+          // Try to extract retry-after from response header
           const retryAfter = response.headers.get("retry-after");
-          const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
-          logWarn(`Rate limit hit, retrying after ${delay}ms...`);
+          if (retryAfter) {
+            delay = parseInt(retryAfter) * 1000;
+          } else if (errorData?.error?.message) {
+            // Try to extract delay from error message (e.g., "Please try again in 13ms")
+            const match = errorData.error.message.match(/try again in (\d+)(ms|s)/i);
+            if (match) {
+              const value = parseInt(match[1]);
+              delay = match[2].toLowerCase() === 's' ? value * 1000 : value;
+              // Add a small buffer
+              delay = Math.max(delay + 1000, 2000);
+            }
+          }
+          
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -201,28 +221,55 @@ async function precomputeIssueEmbeddings(
   embeddingCache: EmbeddingCache
 ): Promise<void> {
   // Process issues in smaller batches to respect rate limits
-  const issueBatchSize = 50; // Process 50 issues at a time
-  const delayMs = 200; // 200ms delay between batches
+  // OpenAI TPM (tokens per minute) limits require careful pacing
+  const issueBatchSize = 10; // Process 10 issues at a time to avoid TPM limits
+  const delayMs = 1000; // 1 second delay between batches to respect TPM limits
+
+  const totalIssues = issues.length;
+  let processedCount = 0;
+  logProgress(`Pre-computing embeddings for ${totalIssues} issues...`);
 
   for (let i = 0; i < issues.length; i += issueBatchSize) {
     const batch = issues.slice(i, i + issueBatchSize);
     
-    // Compute embeddings for this batch of issues
-    await Promise.all(
-      batch.map(async (issue) => {
-        const issueCacheKey = `issue:${issue.number}`;
-        if (!embeddingCache[issueCacheKey]) {
+    // Compute embeddings for this batch of issues sequentially to avoid overwhelming the API
+    for (const issue of batch) {
+      const issueCacheKey = `issue:${issue.number}`;
+      if (!embeddingCache[issueCacheKey]) {
+        try {
           const issueText = createIssueText(issue);
           embeddingCache[issueCacheKey] = await createEmbedding(issueText, apiKey);
+          // Small delay between individual requests to respect rate limits
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (error) {
+          // If rate limited, wait longer before continuing
+          if (error instanceof Error && error.message.includes("429")) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            // Retry this issue
+            try {
+              const issueText = createIssueText(issue);
+              embeddingCache[issueCacheKey] = await createEmbedding(issueText, apiKey);
+            } catch (retryError) {
+              // Skip this issue if it still fails after retry
+              continue;
+            }
+          } else {
+            // Skip this issue on other errors
+            continue;
+          }
         }
-      })
-    );
+      }
+    }
+
+    processedCount = Math.min(i + issueBatchSize, totalIssues);
+    logProgress(`Processed ${processedCount}/${totalIssues} issue embeddings (${Math.round((processedCount / totalIssues) * 100)}%)`);
 
     // Delay between batches to respect rate limits
     if (i + issueBatchSize < issues.length) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
+  logProgress(`Completed pre-computing all ${totalIssues} issue embeddings`);
 }
 
 /**
@@ -246,68 +293,111 @@ export async function classifyMessagesSemantic(
   await precomputeIssueEmbeddings(issues, apiKey, embeddingCache);
 
   // Now process messages - issue embeddings are already cached
-  const messageBatchSize = 5; // Smaller batch for messages (since we compare with all issues)
-  const delayMs = 300; // 300ms delay between message batches
+  // Process messages sequentially to avoid rate limits
+  const delayMs = 200; // 200ms delay between messages
+
+  const totalMessages = messages.length;
+  let processedMessages = 0;
+  logProgress(`Classifying ${totalMessages} messages...`);
 
   const results: ClassifiedMessage[] = [];
 
-  for (let i = 0; i < messages.length; i += messageBatchSize) {
-    const batch = messages.slice(i, i + messageBatchSize);
-    
-    // Process messages in batch
-    const batchResults = await Promise.all(
-      batch.map(async (msg) => {
-        // Get or create message embedding
-        const messageCacheKey = `msg:${msg.id}`;
-        if (!embeddingCache[messageCacheKey]) {
-          embeddingCache[messageCacheKey] = await createEmbedding(msg.content, apiKey);
-        }
-        const messageEmbedding = embeddingCache[messageCacheKey];
+  for (const msg of messages) {
+    try {
+      // Get or create message embedding
+      const messageCacheKey = `msg:${msg.id}`;
+      if (!embeddingCache[messageCacheKey]) {
+        embeddingCache[messageCacheKey] = await createEmbedding(msg.content, apiKey);
+      }
+      const messageEmbedding = embeddingCache[messageCacheKey];
 
-        // Compare with all issue embeddings (already cached)
-        const similarities = issues.map((issue) => {
-          const issueCacheKey = `issue:${issue.number}`;
-          const issueEmbedding = embeddingCache[issueCacheKey];
-          const similarityScore = cosineSimilarity(messageEmbedding, issueEmbedding);
-
-          return {
-            issue,
-            similarityScore,
-            matchedTerms: [], // Not applicable for semantic matching
-          };
-        });
-
-        // Sort by similarity and get top matches
-        const relatedIssues = similarities
-          .sort((a, b) => b.similarityScore - a.similarityScore)
-          .slice(0, 5); // Top 5 matches
+      // Compare with all issue embeddings (already cached)
+      const similarities = issues.map((issue) => {
+        const issueCacheKey = `issue:${issue.number}`;
+        const issueEmbedding = embeddingCache[issueCacheKey];
+        const similarityScore = cosineSimilarity(messageEmbedding, issueEmbedding);
 
         return {
-          message: msg,
-          relatedIssues,
+          issue,
+          similarityScore,
+          matchedTerms: [], // Not applicable for semantic matching
         };
-      })
-    );
+      });
 
-    // Filter by minimum similarity and add to results
-    for (const result of batchResults) {
-      const filteredIssues = result.relatedIssues.filter(
-        match => match.similarityScore >= minSimilarity
-      );
-      if (filteredIssues.length > 0) {
-        results.push({
-          message: result.message,
-          relatedIssues: filteredIssues,
-        });
+      // Sort by similarity and get top matches
+      const relatedIssues = similarities
+        .sort((a, b) => b.similarityScore - a.similarityScore)
+        .slice(0, 5); // Top 5 matches
+
+      results.push({
+        message: msg,
+        relatedIssues,
+      });
+
+      processedMessages++;
+      if (processedMessages % 10 === 0 || processedMessages === totalMessages) {
+        logProgress(`Classified ${processedMessages}/${totalMessages} messages (${Math.round((processedMessages / totalMessages) * 100)}%)`);
       }
-    }
 
-    // Delay between batches to respect rate limits
-    if (i + messageBatchSize < messages.length) {
+      // Small delay between messages to respect rate limits
       await new Promise(resolve => setTimeout(resolve, delayMs));
+    } catch (error) {
+      // If rate limited, wait longer before continuing
+      if (error instanceof Error && error.message.includes("429")) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        // Retry this message
+        try {
+          const messageCacheKey = `msg:${msg.id}`;
+          if (!embeddingCache[messageCacheKey]) {
+            embeddingCache[messageCacheKey] = await createEmbedding(msg.content, apiKey);
+          }
+          const messageEmbedding = embeddingCache[messageCacheKey];
+
+          const similarities = issues.map((issue) => {
+            const issueCacheKey = `issue:${issue.number}`;
+            const issueEmbedding = embeddingCache[issueCacheKey];
+            const similarityScore = cosineSimilarity(messageEmbedding, issueEmbedding);
+
+            return {
+              issue,
+              similarityScore,
+              matchedTerms: [],
+            };
+          });
+
+          const relatedIssues = similarities
+            .sort((a, b) => b.similarityScore - a.similarityScore)
+            .slice(0, 5);
+
+          results.push({
+            message: msg,
+            relatedIssues,
+          });
+        } catch (retryError) {
+          // Skip this message if it still fails after retry
+          continue;
+        }
+      } else {
+        // Skip this message on other errors
+        continue;
+      }
     }
   }
 
-  return results;
+  logProgress(`Completed classifying all ${totalMessages} messages`);
+
+  // Filter by minimum similarity
+  const filteredResults = results.filter(result => {
+    const filteredIssues = result.relatedIssues.filter(
+      match => match.similarityScore >= minSimilarity
+    );
+    if (filteredIssues.length > 0) {
+      result.relatedIssues = filteredIssues;
+      return true;
+    }
+    return false;
+  });
+
+  return filteredResults;
 }
 
