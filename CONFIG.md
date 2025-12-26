@@ -26,7 +26,24 @@ These help scripts find channels by name:
 - `DISCORD_CHANNEL_GENERAL` - General channel name (default: "general")
 - `DISCORD_CHANNEL_CHAT` - Chat channel name (default: "chat")
 
-### File Paths
+### Storage Backend
+- `STORAGE_BACKEND` - Storage backend to use (default: "auto")
+  - `"auto"` - Auto-detect: use PostgreSQL if `DATABASE_URL` is set, otherwise JSON (default)
+  - `"database"` - Always use PostgreSQL (will fail if not configured)
+  - `"json"` - Always use JSON files (useful for testing/development)
+  
+**Default behavior:** If `DATABASE_URL` is set → PostgreSQL, otherwise → JSON files
+
+### Database Configuration (for PostgreSQL backend)
+- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/unmute_mcp`)
+- OR use individual variables:
+  - `DB_HOST` - Database host (default: "localhost")
+  - `DB_PORT` - Database port (default: 5432)
+  - `DB_NAME` - Database name
+  - `DB_USER` - Database user
+  - `DB_PASSWORD` - Database password
+
+### File Paths (for JSON backend)
 - `CACHE_DIR` - Directory for all cache files (default: "cache")
 - `RESULTS_DIR` - Directory for output files (default: "results")
 - `ISSUES_CACHE_FILE` - Name of the issues cache file (default: "github-issues-cache.json")
@@ -56,6 +73,22 @@ GITHUB_REPO=your-repo
 
 # Classification (Optional)
 OPENAI_API_KEY=your_openai_api_key_here
+
+# Storage Backend (Optional)
+# Default: Auto-detect (PostgreSQL if DATABASE_URL set, otherwise JSON)
+# For testing: STORAGE_BACKEND=json
+# STORAGE_BACKEND=auto
+
+# Database Configuration (for PostgreSQL)
+# If DATABASE_URL is set, PostgreSQL will be used automatically
+# Otherwise, JSON files will be used
+DATABASE_URL=postgresql://user:password@localhost:5432/unmute_mcp
+# OR use individual variables:
+# DB_HOST=localhost
+# DB_PORT=5432
+# DB_NAME=unmute_mcp
+# DB_USER=your_user
+# DB_PASSWORD=your_password
 # USE_SEMANTIC_CLASSIFICATION=false  # Uncomment to disable semantic classification
 ```
 

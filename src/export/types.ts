@@ -46,6 +46,7 @@ export interface PMToolIssue {
   priority?: "high" | "medium" | "low";
   metadata?: Record<string, any>;
   linear_issue_id?: string; // Store Linear issue ID for mapping
+  linear_issue_identifier?: string; // Store Linear issue identifier (e.g., "LIN-123") for display
 }
 
 export interface PMToolConfig {

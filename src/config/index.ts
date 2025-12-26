@@ -8,17 +8,20 @@ import type { DiscordConfig } from "./discord.js";
 import type { PathsConfig } from "./paths.js";
 import type { ClassificationConfig } from "./classification.js";
 import type { PMIntegrationConfig } from "./pm-integration.js";
+import type { StorageConfig } from "./storage.js";
 import { getGitHubConfig } from "./github.js";
 import { getDiscordConfig } from "./discord.js";
 import { getPathsConfig } from "./paths.js";
 import { getClassificationConfig } from "./classification.js";
 import { getPMIntegrationConfig } from "./pm-integration.js";
+import { getStorageConfig } from "./storage.js";
 
 export interface Config {
   github: GitHubConfig;
   discord: DiscordConfig;
   paths: PathsConfig;
   classification: ClassificationConfig;
+  storage: StorageConfig;
   pmIntegration?: PMIntegrationConfig;
 }
 
@@ -31,6 +34,7 @@ export function getConfig(): Config {
     discord: getDiscordConfig(),
     paths: getPathsConfig(),
     classification: getClassificationConfig(),
+    storage: getStorageConfig(),
     pmIntegration: getPMIntegrationConfig(),
   };
 }

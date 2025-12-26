@@ -22,6 +22,12 @@ export interface ExportWorkflowResult {
     skipped: number;
   };
   errors?: string[];
+  group_export_mappings?: Array<{
+    group_id: string;
+    id: string; // PM tool issue ID (e.g., Linear issue ID)
+    url: string; // PM tool issue URL
+    identifier?: string; // PM tool issue identifier (e.g., "LIN-123")
+  }>;
 }
 
 /**

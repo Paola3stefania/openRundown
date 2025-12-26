@@ -11,6 +11,8 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "db:import": "tsx scripts/db-import-json.ts",
     "test-discord": "tsx scripts/test-discord.ts",
     "read-channel": "tsx scripts/read-channel.ts",
     "list-servers": "tsx scripts/list-servers.ts",
@@ -38,10 +40,12 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "discord.js": "^14.16.3",
     "dotenv": "^17.2.3",
+    "pg": "^8.11.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.10.9",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -585,28 +585,27 @@ export function groupByClassificationResults(
   for (const classified of classificationResults.classified_threads) {
     totalThreads++;
     
-    // Take top N issues that pass similarity threshold
+    // Take top issue that passes similarity threshold (only best match)
     const topIssues = classified.issues
-      .filter(issue => issue.similarity_score >= minSimilarity)
-      .slice(0, topIssuesPerThread);
+      .filter(issue => issue.similarity_score >= minSimilarity);
     
     if (topIssues.length > 0) {
-      // Thread has matches - add to groups
-      for (const issue of topIssues) {
-        if (!issueToThreads.has(issue.number)) {
-          issueToThreads.set(issue.number, []);
-        }
-        
-        issueToThreads.get(issue.number)!.push({
-          thread_id: classified.thread.thread_id,
-          thread_name: classified.thread.thread_name,
-          similarity_score: issue.similarity_score,
-          url: classified.thread.first_message_url,
-          author: classified.thread.first_message_author,
-          timestamp: classified.thread.first_message_timestamp,
-          issueData: issue,
-        });
+      // Thread has matches - add to group for BEST matching issue only
+      const bestIssue = topIssues[0]; // Already sorted by similarity (highest first)
+      
+      if (!issueToThreads.has(bestIssue.number)) {
+        issueToThreads.set(bestIssue.number, []);
       }
+      
+      issueToThreads.get(bestIssue.number)!.push({
+        thread_id: classified.thread.thread_id,
+        thread_name: classified.thread.thread_name,
+        similarity_score: bestIssue.similarity_score,
+        url: classified.thread.first_message_url,
+        author: classified.thread.first_message_author,
+        timestamp: classified.thread.first_message_timestamp,
+        issueData: bestIssue,
+      });
       groupedThreadIds.add(classified.thread.thread_id);
     } else {
       // Thread has no matches above threshold - mark as ungrouped

@@ -339,7 +339,7 @@ const tools: Tool[] = [
   },
   {
     name: "export_to_pm_tool",
-    description: "Export classified Discord messages and GitHub issues to a PM tool (Linear, Jira, etc.) by extracting features from documentation and mapping conversations to features. Can use either classification results or grouping results. Uses configuration from environment variables (DOCUMENTATION_URLS, PM_TOOL_*).",
+    description: "Export classified Discord messages and GitHub issues to a PM tool (Linear, Jira, etc.). For grouping results, groups should be matched to features first using match_groups_to_features. Can use either classification results or grouping results. Uses configuration from environment variables (PM_TOOL_*).",
     inputSchema: {
       type: "object",
       properties: {
@@ -349,7 +349,7 @@ const tools: Tool[] = [
         },
         grouping_data_path: {
           type: "string",
-          description: "Path to the grouping results JSON file (from suggest_grouping). If provided, exports groups directly without re-mapping to features.",
+          description: "Path to the grouping results JSON file (from suggest_grouping). Groups should be matched to features first using match_groups_to_features.",
         },
       },
       required: [],
@@ -403,6 +403,31 @@ const tools: Tool[] = [
           type: "boolean",
           description: "If true, use pure semantic similarity instead of issue-based grouping (default false)",
           default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "match_groups_to_features",
+    description: "Match groups from grouping results to product features using semantic similarity. Updates the grouping JSON file with affects_features and is_cross_cutting. Requires OPENAI_API_KEY and documentation URLs in config.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        grouping_data_path: {
+          type: "string",
+          description: "Path to the grouping results JSON file. If not provided, uses the most recent grouping file for the channel.",
+        },
+        channel_id: {
+          type: "string",
+          description: "Discord channel ID. Used to find grouping file if grouping_data_path is not provided.",
+        },
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold for feature matching (0-1, default 0.5)",
+          minimum: 0,
+          maximum: 1,
+          default: 0.5,
         },
       },
       required: [],
@@ -1881,6 +1906,37 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { exportGroupingToPMTool } = await import("../export/groupingExporter.js");
           result = await exportGroupingToPMTool(groupingData, pmToolConfig);
           
+          // Update grouping JSON file with export status and suggested titles
+          if (result.success && result.group_export_mappings) {
+            // Update groups with export status
+            const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
+            
+            for (const group of groupingData.groups) {
+              const mapping = exportMappings.get(group.id);
+              if (mapping) {
+                // Mark as exported
+                group.status = "exported";
+                group.exported_at = new Date().toISOString();
+                group.linear_issue_id = mapping.id;
+                group.linear_issue_url = mapping.url;
+                
+                // Store identifier if available (e.g., "LIN-123")
+                if (mapping.identifier) {
+                  (group as any).linear_issue_identifier = mapping.identifier;
+                }
+              }
+              
+              // Ensure suggested_title is set (should already be set by exporter, but double-check)
+              if (!group.suggested_title) {
+                group.suggested_title = group.github_issue?.title || "Untitled Group";
+              }
+            }
+            
+            // Save updated grouping data back to file
+            await writeFile(grouping_data_path, JSON.stringify(groupingData, null, 2), "utf-8");
+            console.error(`[Export] Updated grouping file with export status: ${grouping_data_path}`);
+          }
+          
         } else {
           // Option 2: Export from classification results (requires feature extraction)
           
@@ -2234,17 +2290,128 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // ============================================================
         // STEP 3: Group by classification results (issue-based) OR semantic
         // ============================================================
+        
+        /**
+         * Generate a suggested title for a group
+         * Priority: GitHub issue title (for PR auto-closing) > Thread summary > Fallback
+         * The title should be specific and clear for Linear + GitHub integration
+         */
+        function generateGroupTitleFromThreads(threads: Array<{ thread_name?: string }>, githubIssueTitle?: string): string {
+          // Priority 1: Use GitHub issue title if available (best for PR auto-closing)
+          // This ensures PRs can reference the Linear issue and auto-close it
+          if (githubIssueTitle && githubIssueTitle.trim().length > 0) {
+            // Truncate if too long (Linear has title length limits)
+            if (githubIssueTitle.length > 100) {
+              return githubIssueTitle.substring(0, 97) + "...";
+            }
+            return githubIssueTitle;
+          }
+          
+          // Extract all thread titles
+          const threadTitles = threads
+            .map(t => t.thread_name)
+            .filter((name): name is string => !!name && name.trim().length > 0);
+          
+          if (threadTitles.length === 0) {
+            return "Untitled Group";
+          }
+          
+          // Priority 2: If only one thread, use its title (most specific)
+          if (threadTitles.length === 1) {
+            const title = threadTitles[0];
+            return title.length > 100 ? title.substring(0, 97) + "..." : title;
+          }
+          
+          // Priority 3: Find common keywords across threads to create a summary
+          const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'how', 'what', 'when', 'where', 'why']);
+          
+          // Tokenize and count word frequencies
+          const wordFreq = new Map<string, number>();
+          for (const title of threadTitles) {
+            const words = title.toLowerCase()
+              .replace(/[^\w\s]/g, ' ')
+              .split(/\s+/)
+              .filter(w => w.length > 2 && !stopWords.has(w));
+            
+            for (const word of words) {
+              wordFreq.set(word, (wordFreq.get(word) || 0) + 1);
+            }
+          }
+          
+          // Get most common words (appearing in at least 2 threads or 50% of threads)
+          const minOccurrences = Math.max(2, Math.ceil(threadTitles.length * 0.5));
+          const commonWords = Array.from(wordFreq.entries())
+            .filter(([_, count]) => count >= minOccurrences)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([word]) => word);
+          
+          // Try to build a title from common words
+          if (commonWords.length > 0) {
+            // Find the shortest thread title that contains most common words
+            const scoredTitles = threadTitles.map(title => {
+              const titleLower = title.toLowerCase();
+              const score = commonWords.filter(word => titleLower.includes(word)).length;
+              return { title, score, length: title.length };
+            });
+            
+            scoredTitles.sort((a, b) => {
+              if (b.score !== a.score) return b.score - a.score;
+              return a.length - b.length; // Prefer shorter titles
+            });
+            
+            const bestTitle = scoredTitles[0].title;
+            if (bestTitle.length <= 100) {
+              return bestTitle;
+            }
+            return bestTitle.substring(0, 97) + "...";
+          }
+          
+          // Fallback: use the shortest thread title
+          const shortestTitle = threadTitles.reduce((shortest, current) => 
+            current.length < shortest.length ? current : shortest
+          );
+          
+          return shortestTitle.length > 100 ? shortestTitle.substring(0, 97) + "..." : shortestTitle;
+        }
+        
         let outputData: any;
         
         if (classificationResults && !semantic_only) {
           // Issue-based grouping: Group threads by matched GitHub issues
           console.error(`[Grouping] Grouping by matched GitHub issues...`);
           
-          const groupResult = groupByClassificationResults(classificationResults, {
-            minSimilarity: min_similarity,
-            maxGroups: max_groups,
-            topIssuesPerThread: 3,
-          });
+          // Extract features from documentation for Linear project mapping
+          let features: Feature[] = [];
+          const docUrls = config.pmIntegration?.documentation_urls;
+          if (docUrls && docUrls.length > 0) {
+            try {
+              const { fetchMultipleDocumentation } = await import("../export/documentationFetcher.js");
+              const { extractFeaturesFromDocumentation } = await import("../export/featureExtractor.js");
+              console.error(`[Grouping] Extracting features from documentation for Linear project mapping...`);
+              const docs = await fetchMultipleDocumentation(docUrls);
+              if (docs.length > 0) {
+                const extractedFeatures = await extractFeaturesFromDocumentation(docs);
+                features = extractedFeatures.map(f => ({
+                  id: f.id,
+                  name: f.name,
+                  description: f.description,
+                }));
+                console.error(`[Grouping] Extracted ${features.length} features from documentation`);
+              }
+            } catch (error) {
+              console.error(`[Grouping] Failed to extract features: ${error instanceof Error ? error.message : String(error)}. Continuing without feature mapping.`);
+            }
+          }
+          
+          if (features.length === 0) {
+            // Default feature if no documentation
+            features = [{
+              id: "general",
+              name: "General",
+              description: "General issues and discussions",
+            }];
+          }
           
           // Find existing grouping file to merge with
           await mkdir(resultsDir, { recursive: true });
@@ -2274,73 +2441,226 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             console.error(`[Grouping] Creating new file: ${outputPath}`);
           }
           
+          // Process threads in chunks for incremental saving
+          const BATCH_SIZE = 1000; // Process 1000 threads at a time
+          const allThreads = classificationResults.classified_threads;
+          const totalBatches = Math.ceil(allThreads.length / BATCH_SIZE);
+          
+          // Accumulate groups and ungrouped threads across batches
+          const allGroupsMap = new Map<string, any>(); // issue number -> group
+          const allUngroupedMap = new Map<string, any>(); // thread_id -> ungrouped thread
+          let totalProcessed = 0;
+          
+          // Function to save progress incrementally
+          const saveProgressToFile = async () => {
+            const mergedGroups = Array.from(allGroupsMap.values());
+            const mergedUngrouped = Array.from(allUngroupedMap.values());
+            
+            const outputData = {
+              timestamp: new Date().toISOString(),
+              channel_id: actualChannelId,
+              grouping_method: "issue-based",
+              options: { min_similarity, max_groups },
+              stats: {
+                total_threads_processed: totalProcessed,
+                total_groups_in_file: mergedGroups.length,
+                total_ungrouped_in_file: mergedUngrouped.length,
+                progress: `${totalProcessed}/${allThreads.length}`,
+              },
+              groups: mergedGroups,
+              ungrouped_threads: mergedUngrouped,
+            };
+            
+            await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
+          };
+          
+          // Process threads in batches
+          for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
+            const startIdx = batchNum * BATCH_SIZE;
+            const endIdx = Math.min(startIdx + BATCH_SIZE, allThreads.length);
+            const batch = allThreads.slice(startIdx, endIdx);
+            
+            console.error(`[Grouping] Processing batch ${batchNum + 1}/${totalBatches} (threads ${startIdx + 1}-${endIdx} of ${allThreads.length})...`);
+            
+            // Create a temporary ClassificationResults for this batch
+            const batchClassificationResults: ClassificationResults = {
+              channel_id: actualChannelId,
+              classified_threads: batch,
+            };
+            
+            // Group this batch
+            const batchGroupResult = groupByClassificationResults(batchClassificationResults, {
+              minSimilarity: min_similarity,
+              maxGroups: 0, // No limit per batch, we'll limit at the end
+              topIssuesPerThread: 3,
+            });
+            
+            // Merge groups: if multiple batches have threads for the same issue, merge them
+            for (const group of batchGroupResult.groups) {
+              const issueNumber = group.issue.number;
+              const existingGroup = allGroupsMap.get(`issue-${issueNumber}`);
+              
+              if (existingGroup) {
+                // Merge: combine threads and recalculate average similarity
+                const allThreads = [...existingGroup.threads, ...group.threads];
+                const avgSimilarity = allThreads.reduce((sum, t) => sum + t.similarity_score, 0) / allThreads.length;
+                
+                // Regenerate title from all threads
+                const suggestedTitle = generateGroupTitleFromThreads(
+                  allThreads,
+                  existingGroup.github_issue?.title || group.issue.title
+                );
+                
+                allGroupsMap.set(`issue-${issueNumber}`, {
+                  ...existingGroup,
+                  suggested_title: suggestedTitle,
+                  threads: allThreads,
+                  thread_count: allThreads.length,
+                  avg_similarity: Math.round(avgSimilarity * 10) / 10,
+                });
+              } else {
+                // New group - generate title from thread titles
+                const mappedThreads = group.threads.map(t => ({
+                  thread_id: t.thread_id,
+                  thread_name: t.thread_name,
+                  similarity_score: Math.round(t.similarity_score * 10) / 10,
+                  url: t.url,
+                  author: t.author,
+                }));
+                
+                const suggestedTitle = generateGroupTitleFromThreads(mappedThreads, group.issue.title);
+                
+                allGroupsMap.set(`issue-${issueNumber}`, {
+                  id: group.id,
+                  suggested_title: suggestedTitle,
+                  github_issue: {
+                    number: group.issue.number,
+                    title: group.issue.title,
+                    url: group.issue.url,
+                    state: group.issue.state,
+                    labels: group.issue.labels,
+                  },
+                  avg_similarity: Math.round(group.avgSimilarity * 10) / 10,
+                  thread_count: group.threads.length,
+                  threads: mappedThreads,
+                });
+              }
+            }
+            
+            // Add ungrouped threads
+            for (const ungrouped of batchGroupResult.ungroupedThreads) {
+              allUngroupedMap.set(ungrouped.thread_id, {
+                thread_id: ungrouped.thread_id,
+                thread_name: ungrouped.thread_name,
+                url: ungrouped.url,
+                author: ungrouped.author,
+                timestamp: ungrouped.timestamp,
+                reason: ungrouped.reason,
+                top_issue: ungrouped.top_issue,
+              });
+            }
+            
+            totalProcessed = endIdx;
+            
+            // Save progress after each batch
+            await saveProgressToFile();
+            console.error(`[Grouping] Batch ${batchNum + 1}/${totalBatches} complete. Saved ${allGroupsMap.size} groups and ${allUngroupedMap.size} ungrouped threads.`);
+          }
+          
+          // Final grouping: apply maxGroups limit and sort
+          let finalGroups = Array.from(allGroupsMap.values());
+          
+          // Sort by thread count (descending), then by similarity
+          finalGroups.sort((a, b) => {
+            if (b.thread_count !== a.thread_count) {
+              return b.thread_count - a.thread_count;
+            }
+            return b.avg_similarity - a.avg_similarity;
+          });
+          
+          // Apply maxGroups limit
+          if (max_groups > 0) {
+            finalGroups = finalGroups.slice(0, max_groups);
+          }
+          
+          const finalUngrouped = Array.from(allUngroupedMap.values());
+          
+          // Merge with existing groups (from file)
+          const groupMap = new Map<string, any>();
+          for (const group of existingGroups) {
+            // Ensure existing groups have suggested_title (backfill for old data)
+            if (!group.suggested_title) {
+              if (group.github_issue?.title) {
+                // Use GitHub issue title if available, otherwise generate from threads
+                group.suggested_title = generateGroupTitleFromThreads(
+                  group.threads || [],
+                  group.github_issue.title
+                );
+              } else if (group.threads && group.threads.length > 0) {
+                group.suggested_title = generateGroupTitleFromThreads(group.threads);
+              } else {
+                group.suggested_title = "Untitled Group";
+              }
+            }
+            groupMap.set(group.id, group);
+          }
+          for (const group of finalGroups) {
+            // Ensure new groups have suggested_title (should already be set, but double-check)
+            if (!group.suggested_title) {
+              if (group.github_issue?.title) {
+                group.suggested_title = generateGroupTitleFromThreads(
+                  group.threads || [],
+                  group.github_issue.title
+                );
+              } else if (group.threads && group.threads.length > 0) {
+                group.suggested_title = generateGroupTitleFromThreads(group.threads);
+              } else {
+                group.suggested_title = "Untitled Group";
+              }
+            }
+            groupMap.set(group.id, group); // New groups overwrite existing
+          }
+          const mergedGroups = Array.from(groupMap.values());
+          
+          // Merge ungrouped threads
+          const ungroupedMap = new Map<string, any>();
+          for (const thread of existingUngrouped) {
+            ungroupedMap.set(thread.thread_id, thread);
+          }
+          for (const thread of finalUngrouped) {
+            ungroupedMap.set(thread.thread_id, thread);
+          }
+          const mergedUngrouped = Array.from(ungroupedMap.values());
+          
+          const groupResult = {
+            groups: finalGroups,
+            ungroupedThreads: finalUngrouped,
+            stats: {
+              totalThreads: allThreads.length,
+              groupedThreads: allThreads.length - finalUngrouped.length,
+              ungroupedThreads: finalUngrouped.length,
+              uniqueIssues: allGroupsMap.size,
+              multiThreadGroups: finalGroups.filter(g => g.thread_count > 1).length,
+              singleThreadGroups: finalGroups.filter(g => g.thread_count === 1).length,
+            },
+          };
+          
           // Save groups to history
-          for (const group of groupResult.groups) {
+          for (const group of finalGroups) {
             addGroup(history, {
               group_id: group.id,
-              suggested_title: group.issue.title,
-              similarity: group.avgSimilarity / 100, // Normalize to 0-1
+              suggested_title: group.github_issue.title,
+              similarity: group.avg_similarity / 100, // Normalize to 0-1
               is_cross_cutting: false,
               affects_features: [],
-              signal_ids: group.threads.map(t => `discord:${t.thread_id}`),
-              github_issue: group.issue.number,
+              signal_ids: group.threads.map((t: any) => `discord:${t.thread_id}`),
+              github_issue: group.github_issue.number,
             });
           }
           
           await saveClassificationHistory(history, resultsDir);
           
-          // Format output
-          const formattedGroups = groupResult.groups.map(group => ({
-            id: group.id,
-            github_issue: {
-              number: group.issue.number,
-              title: group.issue.title,
-              url: group.issue.url,
-              state: group.issue.state,
-              labels: group.issue.labels,
-            },
-            avg_similarity: Math.round(group.avgSimilarity * 10) / 10,
-            thread_count: group.threads.length,
-            threads: group.threads.map(t => ({
-              thread_id: t.thread_id,
-              thread_name: t.thread_name,
-              similarity_score: Math.round(t.similarity_score * 10) / 10,
-              url: t.url,
-              author: t.author,
-            })),
-          }));
-          
-          // Format ungrouped threads
-          const formattedUngrouped = groupResult.ungroupedThreads.map(thread => ({
-            thread_id: thread.thread_id,
-            thread_name: thread.thread_name,
-            url: thread.url,
-            author: thread.author,
-            timestamp: thread.timestamp,
-            reason: thread.reason,
-            top_issue: thread.top_issue,
-          }));
-          
-          // Merge with existing groups (deduplicate by group id)
-          const groupMap = new Map<string, any>();
-          for (const group of existingGroups) {
-            groupMap.set(group.id, group);
-          }
-          for (const group of formattedGroups) {
-            groupMap.set(group.id, group); // New groups overwrite existing
-          }
-          const mergedGroups = Array.from(groupMap.values());
-          
-          // Merge ungrouped threads (deduplicate by thread_id)
-          const ungroupedMap = new Map<string, any>();
-          for (const thread of existingUngrouped) {
-            ungroupedMap.set(thread.thread_id, thread);
-          }
-          for (const thread of formattedUngrouped) {
-            ungroupedMap.set(thread.thread_id, thread); // New threads overwrite existing
-          }
-          const mergedUngrouped = Array.from(ungroupedMap.values());
-          
+          // Final save with merged data (mergedGroups and mergedUngrouped already computed above)
           outputData = {
             timestamp: new Date().toISOString(),
             channel_id: actualChannelId,
@@ -2350,8 +2670,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ...groupResult.stats,
               total_groups_in_file: mergedGroups.length,
               total_ungrouped_in_file: mergedUngrouped.length,
-              newly_grouped: formattedGroups.length,
-              newly_ungrouped: formattedUngrouped.length,
+              newly_grouped: finalGroups.length,
+              newly_ungrouped: finalUngrouped.length,
               previously_grouped: existingGroups.length,
               previously_ungrouped: existingUngrouped.length,
             },
@@ -2375,8 +2695,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     ...groupResult.stats,
                     total_groups_in_file: mergedGroups.length,
                     total_ungrouped_in_file: mergedUngrouped.length,
-                    newly_grouped: formattedGroups.length,
-                    newly_ungrouped: formattedUngrouped.length,
+                    newly_grouped: finalGroups.length,
+                    newly_ungrouped: finalUngrouped.length,
                     previously_grouped: existingGroups.length,
                     previously_ungrouped: existingUngrouped.length,
                     total_groups_in_history: updatedGroupStats.totalGroups,
@@ -2388,8 +2708,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   groups: mergedGroups,
                   ungrouped_threads: mergedUngrouped,
                   output_file: outputPath,
-                  message: formattedGroups.length > 0 || formattedUngrouped.length > 0
-                    ? `Added ${formattedGroups.length} new groups and ${formattedUngrouped.length} ungrouped threads. Total: ${mergedGroups.length} groups, ${mergedUngrouped.length} ungrouped. Saved to ${outputPath}`
+                  message: finalGroups.length > 0 || finalUngrouped.length > 0
+                    ? `Processed ${allThreads.length} threads in ${totalBatches} batches. Added ${finalGroups.length} new groups and ${finalUngrouped.length} ungrouped threads. Total: ${mergedGroups.length} groups, ${mergedUngrouped.length} ungrouped. Saved incrementally to ${outputPath}`
                     : `No new data. File has ${mergedGroups.length} groups and ${mergedUngrouped.length} ungrouped threads. File: ${outputPath}`,
                 }, null, 2),
               },
@@ -2642,6 +2962,128 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Grouping failed:", error);
         throw new Error(`Grouping failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "match_groups_to_features": {
+      try {
+        const { 
+          grouping_data_path,
+          channel_id,
+          min_similarity = 0.5,
+        } = args as {
+          grouping_data_path?: string;
+          channel_id?: string;
+          min_similarity?: number;
+        };
+
+        const config = getConfig();
+        const resultsDir = join(process.cwd(), config.paths.resultsDir || "results");
+        
+        // Find grouping file
+        let groupingPath: string;
+        if (grouping_data_path) {
+          groupingPath = grouping_data_path;
+        } else {
+          const actualChannelId = channel_id || config.discord.defaultChannelId;
+          if (!actualChannelId) {
+            throw new Error("Either grouping_data_path or channel_id must be provided");
+          }
+          
+          const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
+          const existingGroupingFile = existingGroupingFiles
+            .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+            .sort()
+            .reverse()[0];
+          
+          if (!existingGroupingFile) {
+            throw new Error(`No grouping file found for channel ${actualChannelId}. Run suggest_grouping first.`);
+          }
+          
+          groupingPath = join(resultsDir, existingGroupingFile);
+        }
+
+        // Load grouping data
+        console.error(`[Feature Matching] Loading grouping data from ${groupingPath}...`);
+        const groupingContent = await readFile(groupingPath, "utf-8");
+        const groupingData = JSON.parse(groupingContent) as {
+          timestamp: string;
+          channel_id: string;
+          grouping_method: string;
+          stats: any;
+          groups: any[];
+          ungrouped_threads?: any[];
+          features?: Array<{ id: string; name: string }>;
+        };
+
+        // Extract features from documentation
+        console.error(`[Feature Matching] Extracting features from documentation...`);
+        const docUrls = config.pmIntegration?.documentation_urls;
+        if (!docUrls || docUrls.length === 0) {
+          throw new Error("No documentation URLs configured. Set DOCUMENTATION_URLS in config.");
+        }
+
+        const { fetchMultipleDocumentation } = await import("../export/documentationFetcher.js");
+        const { extractFeaturesFromDocumentation } = await import("../export/featureExtractor.js");
+        const docs = await fetchMultipleDocumentation(docUrls);
+        
+        if (docs.length === 0) {
+          throw new Error("Failed to fetch documentation");
+        }
+
+        const extractedFeatures = await extractFeaturesFromDocumentation(docs);
+        const features = extractedFeatures.map(f => ({
+          id: f.id,
+          name: f.name,
+          description: f.description,
+        }));
+
+        console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
+
+        // Map groups to features
+        console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
+        const { mapGroupsToFeatures } = await import("../export/featureMapper.js");
+        const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features);
+
+        // Update grouping data
+        groupingData.groups = groupsWithFeatures;
+        groupingData.features = features.map(f => ({ id: f.id, name: f.name }));
+        
+        // Update stats
+        const crossCuttingCount = groupsWithFeatures.filter(g => g.is_cross_cutting).length;
+        groupingData.stats = {
+          ...groupingData.stats,
+          cross_cutting_groups: crossCuttingCount,
+          features_extracted: features.length,
+          groups_matched: groupsWithFeatures.length,
+        };
+
+        // Save updated grouping file
+        await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+        console.error(`[Feature Matching] Updated grouping file with feature matches: ${groupingPath}`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Matched ${groupsWithFeatures.length} groups to ${features.length} features`,
+                stats: {
+                  total_groups: groupsWithFeatures.length,
+                  cross_cutting_groups: crossCuttingCount,
+                  features_extracted: features.length,
+                  groups_matched: groupsWithFeatures.length,
+                },
+                features: features.map(f => ({ id: f.id, name: f.name })),
+                output_file: groupingPath,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Feature matching failed:", error);
+        throw new Error(`Feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

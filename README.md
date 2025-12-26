@@ -51,10 +51,11 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 
 ### Semantic Grouping
 
-- **Hybrid grouping**: Group related signals by semantic similarity, then map to features
+- **Issue-based grouping**: Group threads by their matched GitHub issues (fast, no LLM calls)
+- **Feature matching**: Separate step to map groups to product features using semantic similarity
 - **Cross-cutting detection**: Identify issues affecting multiple product features
 - **Shared embedding cache**: Embeddings computed once, reused by classification and grouping
-- **Feature mapping**: Map groups to product features extracted from documentation
+- **Reviewable workflow**: Match groups to features, review, then export
 
 ### PM Tool Export
 
@@ -63,6 +64,24 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 - Export to Linear, Jira, and other PM tools
 - Automatic documentation crawling for comprehensive feature extraction
 - Export results saved to `results/` for tracking history
+
+### Storage Backends
+
+UNMute supports two storage backends:
+
+- **JSON Files (Default)**: Simple file-based storage, perfect for testing and small datasets
+  - No setup required
+  - Data stored in `cache/` and `results/` directories
+  - Works out of the box
+
+- **PostgreSQL (Optional)**: Production-ready database storage
+  - Better performance for large datasets
+  - SQL queries for advanced analysis
+  - Concurrent access support
+  - Auto-detected when `DATABASE_URL` is set
+  - See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for setup
+
+Switch between backends using `STORAGE_BACKEND` environment variable or by setting/removing `DATABASE_URL`.
 
 ## Setup
 
@@ -87,7 +106,29 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 
    Create a `.env` file or export these variables.
 
-4. Configure MCP server in `cursor-mcp-config.json` (or `~/.cursor/mcp.json`)
+4. **(Optional) Set up PostgreSQL database:**
+   
+   By default, UNMute uses JSON files for storage. To use PostgreSQL:
+   
+   ```bash
+   # Install PostgreSQL (if not already installed)
+   # macOS: brew install postgresql@14
+   # Linux: sudo apt-get install postgresql
+   # Docker: docker run --name unmute-postgres -e POSTGRES_PASSWORD=password -p 5432:5432 -d postgres:14
+   
+   # Create database
+   createdb unmute_mcp
+   
+   # Set DATABASE_URL in .env
+   DATABASE_URL=postgresql://user:password@localhost:5432/unmute_mcp
+   
+   # Run migrations
+   npm run db:migrate
+   ```
+   
+   See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for detailed setup instructions.
+
+5. Configure MCP server in `cursor-mcp-config.json` (or `~/.cursor/mcp.json`)
 
 ## Usage
 
@@ -160,6 +201,31 @@ suggest_grouping → results/grouping-{channelId}-{timestamp}.json
 - `re_classify`: Force re-classification before grouping
 - `semantic_only`: Use pure semantic similarity instead of issue-based grouping
 
+### Matching Groups to Features
+
+After grouping, use `match_groups_to_features` to map groups to product features extracted from documentation:
+
+**Workflow:**
+1. Loads grouping results from file
+2. Extracts product features from documentation (using `DOCUMENTATION_URLS`)
+3. Maps each group to relevant features using semantic similarity
+4. Updates the grouping JSON file with `affects_features` and `is_cross_cutting` flags
+
+```
+match_groups_to_features → updates grouping file with feature mappings
+```
+
+**Why separate step?**
+- **Reviewable**: Inspect matches before exporting
+- **Re-matchable**: Update matches without re-exporting
+- **Faster grouping**: No feature extraction during grouping
+- **Clearer workflow**: Explicit analysis → action separation
+
+**Options:**
+- `grouping_data_path`: Path to grouping file (optional, uses latest if not provided)
+- `channel_id`: Channel ID to find latest grouping file (if path not provided)
+- `min_similarity`: Minimum similarity for feature matching (0-1, default 0.5)
+
 **Output (issue-based grouping):**
 ```json
 {
@@ -188,10 +254,25 @@ suggest_grouping → results/grouping-{channelId}-{timestamp}.json
 
 ### PM Tool Export
 
-Use the `export_to_pm_tool` MCP tool to:
-1. Extract features from documentation
-2. Map conversations to features
-3. Export to Linear, Jira, or other PM tools
+Use the `export_to_pm_tool` MCP tool to export classified data or grouped issues to Linear, Jira, or other PM tools.
+
+**For Classification Results:**
+- Extracts features from documentation
+- Maps conversations to features
+- Exports to PM tool
+
+**For Grouping Results:**
+- **Requires groups to be matched first** using `match_groups_to_features`
+- Reads feature mappings from grouping file
+- Creates Linear projects for features
+- Exports groups as issues
+
+**Complete Workflow:**
+```
+1. suggest_grouping → Create groups
+2. match_groups_to_features → Map groups to features
+3. export_to_pm_tool → Export to Linear/Jira
+```
 
 Configure `DOCUMENTATION_URLS` in `.env` (can be URLs like `https://docs.example.com/docs` which will be crawled, or local file paths).
 
@@ -206,7 +287,8 @@ These tool names are **stable** and will not change. Semantics may evolve, but n
 | `sync_and_classify` | Full workflow: sync messages, sync issues, classify |
 | `classify_discord_messages` | Classify messages with GitHub issues (auto-syncs first) |
 | `suggest_grouping` | Group threads by matched issues (runs classification if needed) |
-| `export_to_pm_tool` | Export classified data to Linear, Jira |
+| `match_groups_to_features` | Map groups to product features using semantic similarity |
+| `export_to_pm_tool` | Export classified data or grouped issues to Linear, Jira |
 
 ### Data Fetching Tools
 
@@ -271,6 +353,7 @@ unmute-mcp/
 │   └── discord-messages-*.json       # Discord messages
 ├── results/               # Output files (gitignored)
 │   ├── discord-classified-*.json     # Classification results
+│   ├── grouping-*.json                # Grouping results (with feature mappings)
 │   ├── classification-history.json   # Classification tracking
 │   └── export-*.json                 # PM export history
 ├── dist/                  # Compiled output

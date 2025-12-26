@@ -79,9 +79,13 @@ export abstract class BasePMTool implements IPMTool {
           result.created_issues++;
           result.issue_urls?.push(created.url);
           
-          // Store Linear issue ID in the issue metadata for mapping
+          // Store Linear issue ID, identifier, and URL in the issue for mapping
+          issue.linear_issue_id = created.id;
           if (created.identifier) {
-            issue.linear_issue_id = created.id;
+            issue.linear_issue_identifier = created.identifier;
+          }
+          if (created.url) {
+            (issue as any).linear_issue_url = created.url;
           }
         }
       } catch (error) {
