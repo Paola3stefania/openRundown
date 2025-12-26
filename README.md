@@ -139,7 +139,7 @@ Available tools via Model Context Protocol:
 ## Project Structure
 
 ```
-discord-mcp/
+unmute-mcp/
 ├── src/
 │   ├── mcp/               # MCP server and tool handlers
 │   │   ├── server.ts      # Main MCP server entry point
