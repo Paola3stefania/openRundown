@@ -1,0 +1,47 @@
+{
+  "name": "discord-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for reading Discord messages and classifying them against GitHub issues",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "discord-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test-discord": "tsx scripts/test-discord.ts",
+    "read-channel": "tsx scripts/read-channel.ts",
+    "list-servers": "tsx scripts/list-servers.ts",
+    "list-channels": "tsx scripts/list-channels.ts",
+    "read-messages": "tsx scripts/read-messages.ts",
+    "check-permissions": "tsx scripts/check-channel-permissions.ts",
+    "search-combined": "tsx scripts/search-combined.ts",
+    "classify-issues": "tsx scripts/classify-discord-issues.ts",
+    "search-specific": "tsx scripts/search-pr-issues.ts",
+    "fetch-issues": "tsx scripts/fetch-all-issues.ts",
+    "fetch-issues-incremental": "tsx scripts/fetch-all-issues.ts --incremental",
+    "fetch-discord": "tsx scripts/fetch-discord-messages.ts",
+    "fetch-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
+    "fetch-all-discord": "tsx scripts/fetch-discord-messages.ts",
+    "fetch-all-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental"
+  },
+  "keywords": [
+    "mcp",
+    "discord",
+    "claude"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^17.2.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

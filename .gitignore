@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+discord-classified-*.json
+results/
+cache/
+github-issues-cache.json
+discord/
+discord-messages-*.json
+cursor-mcp-config.json
