@@ -1437,22 +1437,40 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const useSemantic = classifyConfig.classification.useSemantic;
 
       // Determine output file path BEFORE processing (so we can save incrementally)
+      // Find the file with the MOST threads to merge into (not just most recent)
       const existingFiles = await readdir(resultsDir).catch(() => []);
-      const existingClassificationFile = existingFiles
-        .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'))
-        .sort()
-        .reverse()[0]; // Most recent
-
+      const matchingFiles = existingFiles
+        .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
+      
       let outputPath: string;
       let existingClassifiedThreads: any[] = [];
-
-      if (existingClassificationFile) {
-        outputPath = join(resultsDir, existingClassificationFile);
+      let bestFile: string | null = null;
+      let maxThreads = 0;
+      
+      // Find file with most threads
+      for (const file of matchingFiles) {
+        try {
+          const filePath = join(resultsDir, file);
+          const content = await readFile(filePath, "utf-8");
+          const parsed = JSON.parse(content);
+          const threadCount = parsed.classified_threads?.length || 0;
+          
+          if (threadCount > maxThreads) {
+            maxThreads = threadCount;
+            bestFile = file;
+          }
+        } catch {
+          continue;
+        }
+      }
+      
+      if (bestFile) {
+        outputPath = join(resultsDir, bestFile);
         try {
           const existingContent = await readFile(outputPath, "utf-8");
           const existingData = JSON.parse(existingContent);
           existingClassifiedThreads = existingData.classified_threads || [];
-          console.error(`[Classification] Will merge into existing file: ${existingClassificationFile} (${existingClassifiedThreads.length} threads)`);
+          console.error(`[Classification] Will merge into existing file: ${bestFile} (${existingClassifiedThreads.length} threads)`);
         } catch {
           // If can't read, create new
           const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
@@ -2054,22 +2072,41 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // ============================================================
         let classificationResults: ClassificationResults | null = null;
         
-        // Find classification file for this channel
+        // Find classification file for this channel - use the one with the MOST threads
         const classificationFiles = await readdir(resultsDir).catch(() => []);
-        const classificationFile = classificationFiles
-          .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'))
-          .sort()
-          .reverse()[0]; // Most recent
+        const matchingFiles = classificationFiles
+          .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
         
-        if (classificationFile && !semantic_only) {
-          const classificationPath = join(resultsDir, classificationFile);
+        // Find file with most threads
+        let bestFile: string | null = null;
+        let maxThreads = 0;
+        
+        for (const file of matchingFiles) {
+          try {
+            const filePath = join(resultsDir, file);
+            const content = await readFile(filePath, "utf-8");
+            const parsed = JSON.parse(content) as ClassificationResults;
+            const threadCount = parsed.classified_threads?.length || 0;
+            
+            if (threadCount > maxThreads) {
+              maxThreads = threadCount;
+              bestFile = file;
+            }
+          } catch {
+            // Skip files that can't be read
+            continue;
+          }
+        }
+        
+        if (bestFile && !semantic_only) {
+          const classificationPath = join(resultsDir, bestFile);
           const classificationContent = await readFile(classificationPath, "utf-8");
           const parsed = JSON.parse(classificationContent) as ClassificationResults;
           
           // Only use if it has actual data
           if (parsed.classified_threads && parsed.classified_threads.length > 0) {
             classificationResults = parsed;
-            console.error(`[Grouping] Found classification results: ${parsed.classified_threads.length} threads in ${classificationFile}`);
+            console.error(`[Grouping] Found classification results: ${parsed.classified_threads.length} threads in ${bestFile}`);
           }
         }
 
@@ -2219,6 +2256,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           let outputPath: string;
           let existingGroups: any[] = [];
+          let existingUngrouped: any[] = [];
 
           if (existingGroupingFile) {
             outputPath = join(resultsDir, existingGroupingFile);
@@ -2226,7 +2264,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const existingContent = await readFile(outputPath, "utf-8");
               const existingData = JSON.parse(existingContent);
               existingGroups = existingData.groups || [];
-              console.error(`[Grouping] Merging with existing file: ${existingGroupingFile} (${existingGroups.length} groups)`);
+              existingUngrouped = existingData.ungrouped_threads || [];
+              console.error(`[Grouping] Merging with existing file: ${existingGroupingFile} (${existingGroups.length} groups, ${existingUngrouped.length} ungrouped)`);
             } catch {
               outputPath = join(resultsDir, `grouping-${actualChannelId}-${Date.now()}.json`);
             }
@@ -2271,6 +2310,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             })),
           }));
           
+          // Format ungrouped threads
+          const formattedUngrouped = groupResult.ungroupedThreads.map(thread => ({
+            thread_id: thread.thread_id,
+            thread_name: thread.thread_name,
+            url: thread.url,
+            author: thread.author,
+            timestamp: thread.timestamp,
+            reason: thread.reason,
+            top_issue: thread.top_issue,
+          }));
+          
           // Merge with existing groups (deduplicate by group id)
           const groupMap = new Map<string, any>();
           for (const group of existingGroups) {
@@ -2281,6 +2331,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           const mergedGroups = Array.from(groupMap.values());
           
+          // Merge ungrouped threads (deduplicate by thread_id)
+          const ungroupedMap = new Map<string, any>();
+          for (const thread of existingUngrouped) {
+            ungroupedMap.set(thread.thread_id, thread);
+          }
+          for (const thread of formattedUngrouped) {
+            ungroupedMap.set(thread.thread_id, thread); // New threads overwrite existing
+          }
+          const mergedUngrouped = Array.from(ungroupedMap.values());
+          
           outputData = {
             timestamp: new Date().toISOString(),
             channel_id: actualChannelId,
@@ -2289,10 +2349,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             stats: {
               ...groupResult.stats,
               total_groups_in_file: mergedGroups.length,
+              total_ungrouped_in_file: mergedUngrouped.length,
               newly_grouped: formattedGroups.length,
+              newly_ungrouped: formattedUngrouped.length,
               previously_grouped: existingGroups.length,
+              previously_ungrouped: existingUngrouped.length,
             },
             groups: mergedGroups,
+            ungrouped_threads: mergedUngrouped,
           };
           
           await writeFile(outputPath, JSON.stringify(outputData, null, 2), "utf-8");
@@ -2310,18 +2374,23 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   stats: {
                     ...groupResult.stats,
                     total_groups_in_file: mergedGroups.length,
+                    total_ungrouped_in_file: mergedUngrouped.length,
                     newly_grouped: formattedGroups.length,
+                    newly_ungrouped: formattedUngrouped.length,
                     previously_grouped: existingGroups.length,
+                    previously_ungrouped: existingUngrouped.length,
                     total_groups_in_history: updatedGroupStats.totalGroups,
                     exported_groups: updatedGroupStats.exportedGroups,
                     pending_groups: updatedGroupStats.pendingGroups,
                   },
                   groups_count: mergedGroups.length,
+                  ungrouped_count: mergedUngrouped.length,
                   groups: mergedGroups,
+                  ungrouped_threads: mergedUngrouped,
                   output_file: outputPath,
-                  message: formattedGroups.length > 0
-                    ? `Added ${formattedGroups.length} new groups. Total in file: ${mergedGroups.length}. Saved to ${outputPath}`
-                    : `No new groups. File has ${mergedGroups.length} groups. File: ${outputPath}`,
+                  message: formattedGroups.length > 0 || formattedUngrouped.length > 0
+                    ? `Added ${formattedGroups.length} new groups and ${formattedUngrouped.length} ungrouped threads. Total: ${mergedGroups.length} groups, ${mergedUngrouped.length} ungrouped. Saved to ${outputPath}`
+                    : `No new data. File has ${mergedGroups.length} groups and ${mergedUngrouped.length} ungrouped threads. File: ${outputPath}`,
                 }, null, 2),
               },
             ],

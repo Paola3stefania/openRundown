@@ -525,6 +525,20 @@ export interface IssueBasedGroup {
   avgSimilarity: number;
 }
 
+export interface UngroupedThread {
+  thread_id: string;
+  thread_name?: string;
+  url?: string;
+  author?: string;
+  timestamp?: string;
+  reason: "no_matches" | "below_threshold";
+  top_issue?: {
+    number: number;
+    title: string;
+    similarity_score: number;
+  };
+}
+
 /**
  * Group Discord threads by their matched GitHub issues from classification results
  * Threads that matched the same issue → same group
@@ -539,13 +553,17 @@ export function groupByClassificationResults(
   } = {}
 ): {
   groups: IssueBasedGroup[];
+  ungroupedThreads: UngroupedThread[];
   stats: {
     totalThreads: number;
     groupedThreads: number;
+    ungroupedThreads: number;
     uniqueIssues: number;
+    multiThreadGroups: number;
+    singleThreadGroups: number;
   };
 } {
-  const { minSimilarity = 60, maxGroups = 50, topIssuesPerThread = 3 } = options;
+  const { minSimilarity = 60, maxGroups = 0, topIssuesPerThread = 3 } = options; // maxGroups=0 means no limit
   
   // Map: issue number → list of threads that matched it
   const issueToThreads = new Map<number, Array<{
@@ -558,8 +576,11 @@ export function groupByClassificationResults(
     issueData: ClassifiedThread["issues"][0];
   }>>();
   
+  // Track which threads were grouped
+  const groupedThreadIds = new Set<string>();
+  const ungroupedThreads: UngroupedThread[] = [];
+  
   let totalThreads = 0;
-  let groupedThreads = 0;
   
   for (const classified of classificationResults.classified_threads) {
     totalThreads++;
@@ -570,27 +591,43 @@ export function groupByClassificationResults(
       .slice(0, topIssuesPerThread);
     
     if (topIssues.length > 0) {
-      groupedThreads++;
-    }
-    
-    for (const issue of topIssues) {
-      if (!issueToThreads.has(issue.number)) {
-        issueToThreads.set(issue.number, []);
+      // Thread has matches - add to groups
+      for (const issue of topIssues) {
+        if (!issueToThreads.has(issue.number)) {
+          issueToThreads.set(issue.number, []);
+        }
+        
+        issueToThreads.get(issue.number)!.push({
+          thread_id: classified.thread.thread_id,
+          thread_name: classified.thread.thread_name,
+          similarity_score: issue.similarity_score,
+          url: classified.thread.first_message_url,
+          author: classified.thread.first_message_author,
+          timestamp: classified.thread.first_message_timestamp,
+          issueData: issue,
+        });
       }
-      
-      issueToThreads.get(issue.number)!.push({
+      groupedThreadIds.add(classified.thread.thread_id);
+    } else {
+      // Thread has no matches above threshold - mark as ungrouped
+      const topIssue = classified.issues.length > 0 ? classified.issues[0] : undefined;
+      ungroupedThreads.push({
         thread_id: classified.thread.thread_id,
         thread_name: classified.thread.thread_name,
-        similarity_score: issue.similarity_score,
         url: classified.thread.first_message_url,
         author: classified.thread.first_message_author,
         timestamp: classified.thread.first_message_timestamp,
-        issueData: issue,
+        reason: topIssue ? "below_threshold" : "no_matches",
+        top_issue: topIssue ? {
+          number: topIssue.number,
+          title: topIssue.title,
+          similarity_score: topIssue.similarity_score,
+        } : undefined,
       });
     }
   }
   
-  // Convert map to groups
+  // Convert map to groups - include ALL groups (even single-thread ones)
   const groups: IssueBasedGroup[] = [];
   
   for (const [issueNumber, threads] of issueToThreads) {
@@ -603,6 +640,7 @@ export function groupByClassificationResults(
     // Calculate average similarity
     const avgSimilarity = threads.reduce((sum, t) => sum + t.similarity_score, 0) / threads.length;
     
+    // Include ALL groups (single-thread groups are still groups)
     groups.push({
       id: `issue-${issueNumber}`,
       issue: {
@@ -624,20 +662,32 @@ export function groupByClassificationResults(
     });
   }
   
-  // Sort by number of threads (more threads = more important group)
-  groups.sort((a, b) => b.threads.length - a.threads.length);
+  // Sort by number of threads (more threads = more important group), then by similarity
+  groups.sort((a, b) => {
+    if (b.threads.length !== a.threads.length) {
+      return b.threads.length - a.threads.length;
+    }
+    return b.avgSimilarity - a.avgSimilarity;
+  });
   
-  // Limit groups
-  const limitedGroups = groups.slice(0, maxGroups);
+  // Limit groups if maxGroups > 0
+  const limitedGroups = maxGroups > 0 ? groups.slice(0, maxGroups) : groups;
   
-  console.error(`[GroupByClassification] Created ${limitedGroups.length} groups from ${totalThreads} threads (${groupedThreads} with matches)`);
+  const multiThreadGroups = limitedGroups.filter(g => g.threads.length > 1).length;
+  const singleThreadGroups = limitedGroups.filter(g => g.threads.length === 1).length;
+  
+  console.error(`[GroupByClassification] Created ${limitedGroups.length} groups (${multiThreadGroups} multi-thread, ${singleThreadGroups} single-thread) from ${totalThreads} threads. ${ungroupedThreads.length} ungrouped.`);
   
   return {
     groups: limitedGroups,
+    ungroupedThreads,
     stats: {
       totalThreads,
-      groupedThreads,
+      groupedThreads: groupedThreadIds.size,
+      ungroupedThreads: ungroupedThreads.length,
       uniqueIssues: issueToThreads.size,
+      multiThreadGroups,
+      singleThreadGroups,
     },
   };
 }
