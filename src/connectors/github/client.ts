@@ -73,13 +73,15 @@ export async function searchGitHubIssues(
  * @param owner - Repository owner (defaults to config)
  * @param repo - Repository name (defaults to config)
  * @param since - ISO date string - only fetch issues updated after this date (for incremental updates)
+ * @param limit - Maximum number of issues to fetch (undefined = no limit)
  */
 export async function fetchAllGitHubIssues(
   token?: string,
   includeClosed = true,
   owner?: string,
   repo?: string,
-  since?: string
+  since?: string,
+  limit?: number
 ): Promise<GitHubIssue[]> {
   const config = getConfig();
   const repoOwner = owner || config.github.owner;
@@ -100,7 +102,7 @@ export async function fetchAllGitHubIssues(
   
   // Reduced logging to avoid MCP client JSON parsing errors
   // log("Fetching open issues...");
-  while (hasMore) {
+  while (hasMore && (limit === undefined || allIssues.length < limit)) {
     let url = `https://api.github.com/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100&page=${page}&sort=updated&direction=desc`;
     if (since) {
       url += `&since=${encodeURIComponent(since)}`;
@@ -118,6 +120,16 @@ export async function fetchAllGitHubIssues(
     
     // Filter out pull requests (issues have pull_request field set to null)
     const actualIssues = issues.filter(issue => !issue.pull_request);
+    
+    // Apply limit if specified
+    if (limit !== undefined && allIssues.length + actualIssues.length > limit) {
+      const remaining = limit - allIssues.length;
+      if (remaining > 0) {
+        allIssues.push(...(actualIssues.slice(0, remaining) as GitHubIssue[]));
+      }
+      hasMore = false;
+      break;
+    }
     
     // Add actual issues to our collection
     if (actualIssues.length > 0) {
@@ -144,7 +156,7 @@ export async function fetchAllGitHubIssues(
     
     // Reduced logging to avoid MCP client JSON parsing errors
     // log("Fetching closed issues...");
-    while (hasMore) {
+    while (hasMore && (limit === undefined || allIssues.length < limit)) {
       let url = `https://api.github.com/repos/${repoOwner}/${repoName}/issues?state=closed&per_page=100&page=${page}&sort=updated&direction=desc`;
       if (since) {
         url += `&since=${encodeURIComponent(since)}`;
@@ -162,6 +174,16 @@ export async function fetchAllGitHubIssues(
       
       // Filter out pull requests (issues have pull_request field set to null)
       const actualIssues = issues.filter(issue => !issue.pull_request);
+      
+      // Apply limit if specified
+      if (limit !== undefined && allIssues.length + actualIssues.length > limit) {
+        const remaining = limit - allIssues.length;
+        if (remaining > 0) {
+          allIssues.push(...(actualIssues.slice(0, remaining) as GitHubIssue[]));
+        }
+        hasMore = false;
+        break;
+      }
       
       // Add actual issues to our collection
       if (actualIssues.length > 0) {

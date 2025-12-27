@@ -190,11 +190,17 @@ Switch between backends using `STORAGE_BACKEND` environment variable or by setti
    
    # 2. Extract features from documentation
    manage_documentation_cache(action: "extract_features")
+   
+   # 3. Compute embeddings (separate step - not done during fetch)
+   manage_documentation_cache(action: "compute_embeddings")
    ```
    
+   **Important:** Embeddings are **not** computed automatically when fetching documentation. You must run `compute_embeddings` as a separate step after fetching docs and extracting features.
+   
    Or use the MCP tools directly:
-   - `manage_documentation_cache` with `action: "fetch"` - Fetches and caches documentation
+   - `manage_documentation_cache` with `action: "fetch"` - Fetches and caches documentation (does NOT compute embeddings)
    - `manage_documentation_cache` with `action: "extract_features"` - Extracts product features from cached documentation
+   - `manage_documentation_cache` with `action: "compute_embeddings"` - Computes embeddings for all documentation, sections, and features (requires `OPENAI_API_KEY`)
    
    See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for detailed setup instructions.
 
@@ -390,6 +396,7 @@ These tools are used internally by the workflow tools, but can also be called di
 
 | Tool | Description |
 |------|-------------|
+| `manage_documentation_cache` | Manage documentation cache: `fetch` (fetch docs), `extract_features` (extract features), `compute_embeddings` (compute embeddings - separate step), `list` (list cached docs), `clear` (clear cache) |
 | `list_linear_teams` | List Linear teams (for configuration) |
 | `validate_pm_setup` | Validate PM tool configuration |
 

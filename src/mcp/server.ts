@@ -261,6 +261,10 @@ const tools: Tool[] = [
           description: "If true and cache exists, only fetches new/updated issues. If false or no cache, fetches all issues.",
           default: true,
         },
+        limit: {
+          type: "number",
+          description: "Maximum number of issues to fetch. Omit to fetch all issues. When database is not configured, defaults to DEFAULT_FETCH_LIMIT_ISSUES (default: 100).",
+        },
       },
       required: [],
     },
@@ -282,7 +286,7 @@ const tools: Tool[] = [
         },
         limit: {
           type: "number",
-          description: "Maximum number of messages to fetch. Omit to fetch all messages.",
+          description: "Maximum number of messages to fetch. Omit to fetch all messages. When database is not configured, defaults to DEFAULT_FETCH_LIMIT_MESSAGES (default: 100).",
         },
       },
       required: [],
@@ -825,8 +829,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "fetch_github_issues": {
-      const { incremental = false } = args as { incremental?: boolean };
-      const githubConfig = getConfig();
+      const { incremental = false, limit } = args as { incremental?: boolean; limit?: number };
+      const config = getConfig();
+      const githubConfig = config;
       const cachePath = join(process.cwd(), githubConfig.paths.cacheDir, githubConfig.paths.issuesCacheFile);
 
       try {
@@ -845,8 +850,18 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Determine limit: use provided limit, or apply default when DB is not configured
+        let actualLimit = limit;
+        if (actualLimit === undefined) {
+          const { hasDatabaseConfig } = await import("../storage/factory.js");
+          if (!hasDatabaseConfig()) {
+            // Apply default limit when DB is not configured (try-it-out mode)
+            actualLimit = config.storage.defaultLimit?.issues;
+          }
+        }
+
         const githubToken = process.env.GITHUB_TOKEN;
-        const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceDate);
+        const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceDate, actualLimit);
 
         // Merge with existing cache if doing incremental update
         let finalIssues: GitHubIssue[];
@@ -906,14 +921,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         limit?: number;
       };
 
-      const discordConfig = getConfig();
-      const actualChannelId = channel_id || discordConfig.discord.defaultChannelId;
+      const config = getConfig();
+      const discordConfig = config.discord;
+      const actualChannelId = channel_id || discordConfig.defaultChannelId;
 
       if (!actualChannelId) {
         throw new Error("Channel ID is required. Provide channel_id parameter or set DISCORD_DEFAULT_CHANNEL_ID in environment variables.");
       }
 
-      const cacheDir = join(process.cwd(), discordConfig.paths.cacheDir);
+      const cacheDir = join(process.cwd(), config.paths.cacheDir);
       const cacheFileName = `discord-messages-${actualChannelId}.json`;
       const cachePath = join(cacheDir, cacheFileName);
 
@@ -951,11 +967,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Determine limit: use provided limit, or apply default when DB is not configured
+        let actualLimit = limit;
+        if (actualLimit === undefined) {
+          const { hasDatabaseConfig } = await import("../storage/factory.js");
+          if (!hasDatabaseConfig()) {
+            // Apply default limit when DB is not configured (try-it-out mode)
+            actualLimit = config.storage.defaultLimit?.messages;
+          }
+        }
+
         // Fetch messages with pagination
         let fetchedMessages: any[] = [];
         let lastMessageId: string | undefined = undefined;
         let hasMore = true;
-        const maxMessages = limit; // undefined = no limit (fetch all)
+        const maxMessages = actualLimit; // undefined = no limit (fetch all)
 
         while (hasMore && (maxMessages === undefined || fetchedMessages.length < maxMessages)) {
           const options: { limit: number; before?: string } = { limit: 100 };
