@@ -28,6 +28,18 @@ export interface ExportWorkflowResult {
     url: string; // PM tool issue URL
     identifier?: string; // PM tool issue identifier (e.g., "LIN-123")
   }>;
+  ungrouped_thread_export_mappings?: Array<{
+    thread_id: string;
+    id: string; // PM tool issue ID (e.g., Linear issue ID)
+    url: string; // PM tool issue URL
+    identifier?: string; // PM tool issue identifier (e.g., "LIN-123")
+  }>;
+  ungrouped_issue_export_mappings?: Array<{
+    issue_number: number;
+    id: string; // PM tool issue ID (e.g., Linear issue ID)
+    url: string; // PM tool issue URL
+    identifier?: string; // PM tool issue identifier (e.g., "LIN-123")
+  }>;
 }
 
 /**

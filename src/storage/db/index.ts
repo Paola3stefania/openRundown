@@ -33,6 +33,14 @@ export class DatabaseStorage implements IStorage {
 
     await prisma.$transaction(async (tx) => {
       for (const thread of threads) {
+        // Determine match status based on issues
+        let matchStatus: string | null = null;
+        if (thread.issues.length > 0) {
+          matchStatus = "matched";
+        } else {
+          matchStatus = "no_matches";
+        }
+
         // Upsert thread
         await tx.classifiedThread.upsert({
           where: { threadId: thread.thread_id },
@@ -43,6 +51,7 @@ export class DatabaseStorage implements IStorage {
             firstMessageTimestamp: thread.first_message_timestamp ? new Date(thread.first_message_timestamp) : null,
             firstMessageUrl: thread.first_message_url ?? null,
             status: thread.status,
+            matchStatus: matchStatus,
           },
           create: {
             threadId: thread.thread_id,
@@ -54,6 +63,7 @@ export class DatabaseStorage implements IStorage {
             firstMessageTimestamp: thread.first_message_timestamp ? new Date(thread.first_message_timestamp) : null,
             firstMessageUrl: thread.first_message_url ?? null,
             status: thread.status,
+            matchStatus: matchStatus,
           },
         });
 
@@ -106,6 +116,7 @@ export class DatabaseStorage implements IStorage {
       first_message_url: thread.firstMessageUrl ?? undefined,
       classified_at: thread.classifiedAt.toISOString(),
       status: thread.status as "pending" | "classifying" | "completed" | "failed",
+      match_status: thread.matchStatus as "matched" | "below_threshold" | "no_matches" | null | undefined,
       issues: thread.issueMatches.map((match) => ({
         number: match.issueNumber,
         title: match.issueTitle,
@@ -139,6 +150,7 @@ export class DatabaseStorage implements IStorage {
       channel_id: thread.channelId,
       thread_name: thread.threadName ?? undefined,
       message_count: thread.messageCount,
+      match_status: thread.matchStatus as "matched" | "below_threshold" | "no_matches" | null | undefined,
       first_message_id: thread.firstMessageId ?? "",
       first_message_author: thread.firstMessageAuthor ?? undefined,
       first_message_timestamp: thread.firstMessageTimestamp?.toISOString(),
@@ -339,15 +351,18 @@ export class DatabaseStorage implements IStorage {
 
     await prisma.$transaction(async (tx) => {
       for (const thread of threads) {
-        // Ensure thread exists in classified_threads
+        // Ensure thread exists in classified_threads and update match_status
         await tx.classifiedThread.upsert({
           where: { threadId: thread.thread_id },
-          update: {},
+          update: {
+            matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
+          },
           create: {
             threadId: thread.thread_id,
             channelId: thread.channel_id,
             threadName: thread.thread_name ?? null,
             status: "completed",
+            matchStatus: thread.reason, // 'no_matches' or 'below_threshold'
           },
         });
 
@@ -689,6 +704,111 @@ export class DatabaseStorage implements IStorage {
       message_id: entry.messageId,
       thread_id: entry.threadId ?? undefined,
       classified_at: entry.classifiedAt.toISOString(),
+    }));
+  }
+
+  async saveGitHubIssue(issue: {
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }): Promise<void> {
+    await this.saveGitHubIssues([issue]);
+  }
+
+  async saveGitHubIssues(issues: Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }>): Promise<void> {
+    if (issues.length === 0) return;
+
+    await prisma.$transaction(async (tx) => {
+      for (const issue of issues) {
+        await tx.gitHubIssue.upsert({
+          where: { issueNumber: issue.number },
+          update: {
+            issueTitle: issue.title,
+            issueUrl: issue.url,
+            issueState: issue.state ?? null,
+            issueBody: issue.body ?? null,
+            issueLabels: issue.labels ?? [],
+            issueAuthor: issue.author ?? null,
+            issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+            issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+          },
+          create: {
+            issueNumber: issue.number,
+            issueTitle: issue.title,
+            issueUrl: issue.url,
+            issueState: issue.state ?? null,
+            issueBody: issue.body ?? null,
+            issueLabels: issue.labels ?? [],
+            issueAuthor: issue.author ?? null,
+            issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+            issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+          },
+        });
+      }
+    });
+  }
+
+  async getGitHubIssues(options?: {
+    inGroup?: boolean;
+    matchedToThreads?: boolean;
+    state?: string;
+  }): Promise<Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+    in_group?: boolean;
+    matched_to_threads?: boolean;
+  }>> {
+    const where: any = {};
+    if (options?.inGroup !== undefined) {
+      where.inGroup = options.inGroup;
+    }
+    if (options?.matchedToThreads !== undefined) {
+      where.matchedToThreads = options.matchedToThreads;
+    }
+    if (options?.state) {
+      where.issueState = options.state;
+    }
+
+    const issues = await prisma.gitHubIssue.findMany({
+      where,
+      orderBy: { issueNumber: "desc" },
+    });
+
+    return issues.map((issue) => ({
+      number: issue.issueNumber,
+      title: issue.issueTitle,
+      url: issue.issueUrl,
+      state: issue.issueState ?? undefined,
+      body: issue.issueBody ?? undefined,
+      labels: issue.issueLabels,
+      author: issue.issueAuthor ?? undefined,
+      created_at: issue.issueCreatedAt?.toISOString(),
+      updated_at: issue.issueUpdatedAt?.toISOString(),
+      in_group: issue.inGroup,
+      matched_to_threads: issue.matchedToThreads,
     }));
   }
 }

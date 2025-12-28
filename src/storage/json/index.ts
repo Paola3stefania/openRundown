@@ -710,5 +710,92 @@ export class JsonStorage implements IStorage {
       };
     });
   }
+
+  async saveGitHubIssue(issue: {
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }): Promise<void> {
+    await this.saveGitHubIssues([issue]);
+  }
+
+  async saveGitHubIssues(issues: Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }>): Promise<void> {
+    // For JSON storage, GitHub issues are stored in the cache file
+    // This method is a no-op as issues are saved via the cache file in fetch_github_issues
+    // The cache file is managed by the MCP server directly
+  }
+
+  async getGitHubIssues(options?: {
+    inGroup?: boolean;
+    matchedToThreads?: boolean;
+    state?: string;
+  }): Promise<Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+    in_group?: boolean;
+    matched_to_threads?: boolean;
+  }>> {
+    // For JSON storage, load from the cache file
+    const config = getConfig();
+    const cachePath = join(process.cwd(), config.paths.cacheDir || "cache", "github-issues-cache.json");
+    
+    if (!existsSync(cachePath)) {
+      return [];
+    }
+
+    try {
+      const content = await readFile(cachePath, "utf-8");
+      const cache: { issues: any[] } = JSON.parse(content);
+      
+      let issues = cache.issues || [];
+      
+      // Apply filters if provided
+      if (options?.state) {
+        issues = issues.filter(i => i.state === options.state);
+      }
+      
+      // Note: inGroup and matchedToThreads are not stored in JSON cache
+      // These would need to be computed from groups/threads if needed
+      
+      return issues.map(issue => ({
+        number: issue.number,
+        title: issue.title,
+        url: issue.html_url || issue.url,
+        state: issue.state,
+        body: issue.body,
+        labels: issue.labels?.map((l: any) => typeof l === 'string' ? l : l.name) || [],
+        author: issue.user?.login || issue.author,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+        in_group: false, // Not stored in JSON cache
+        matched_to_threads: false, // Not stored in JSON cache
+      }));
+    } catch {
+      return [];
+    }
+  }
 }
 

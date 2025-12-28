@@ -8,6 +8,7 @@ import { createPMTool } from "./factory.js";
 import type { PMToolConfig, PMToolIssue } from "./types.js";
 import type { ExportWorkflowResult } from "./workflow.js";
 import { getConfig } from "../config/index.js";
+import { join } from "path";
 
 interface GroupingSignal {
   source: string;
@@ -63,6 +64,19 @@ interface GroupingData {
   };
   features: Array<{ id: string; name: string }>;
   groups: GroupingGroup[];
+  ungrouped_threads?: Array<{
+    thread_id: string;
+    thread_name?: string;
+    url?: string;
+    author?: string;
+    timestamp?: string;
+    reason: "no_matches" | "below_threshold";
+    top_issue?: {
+      number: number;
+      title: string;
+      similarity_score: number;
+    };
+  }>;
 }
 
 /**
@@ -416,27 +430,457 @@ export async function exportGroupingToPMTool(
       issueToGroupMap.set(issueIndex, group);
     }
 
+    // STEP 2: Export ungrouped threads (threads that didn't match any issues)
+    const ungroupedThreads = groupingData.ungrouped_threads || [];
+    log(`Preparing ${ungroupedThreads.length} ungrouped threads for export...`);
+    
+    for (const ungroupedThread of ungroupedThreads) {
+      // Generate title for ungrouped thread
+      const threadTitle = ungroupedThread.thread_name || `Discord Thread ${ungroupedThread.thread_id}`;
+      const title = ungroupedThread.thread_name 
+        ? `[Ungrouped] ${threadTitle}`
+        : `[Ungrouped Thread] ${ungroupedThread.thread_id}`;
+      
+      // Build description
+      const descriptionParts: string[] = [];
+      descriptionParts.push("## Problem Summary");
+      descriptionParts.push("");
+      descriptionParts.push(`This Discord thread did not match any GitHub issues.`);
+      descriptionParts.push("");
+      
+      if (ungroupedThread.reason === "below_threshold" && ungroupedThread.top_issue) {
+        descriptionParts.push(`**Closest match:** GitHub issue #${ungroupedThread.top_issue.number} "${ungroupedThread.top_issue.title}" (${Math.round(ungroupedThread.top_issue.similarity_score)}% similarity, below threshold)`);
+        descriptionParts.push("");
+      } else {
+        descriptionParts.push(`**Reason:** No matching GitHub issues found.`);
+        descriptionParts.push("");
+      }
+      
+      descriptionParts.push("---");
+      descriptionParts.push("");
+      descriptionParts.push("## Discord Thread");
+      descriptionParts.push("");
+      if (ungroupedThread.url) {
+        descriptionParts.push(`- [View Thread](${ungroupedThread.url})`);
+      }
+      if (ungroupedThread.author) {
+        descriptionParts.push(`- **Author:** @${ungroupedThread.author}`);
+      }
+      if (ungroupedThread.timestamp) {
+        descriptionParts.push(`- **Created:** ${new Date(ungroupedThread.timestamp).toLocaleString()}`);
+      }
+      
+      // Assign to "General" project
+      const generalProjectId = projectMappings.get("general");
+      
+      const ungroupedThreadIssueIndex = pmIssues.length;
+      pmIssues.push({
+        title,
+        description: descriptionParts.join("\n"),
+        feature_id: "general",
+        feature_name: "General",
+        project_id: generalProjectId,
+        source: "discord",
+        source_url: ungroupedThread.url || "",
+        source_id: `ungrouped-thread-${ungroupedThread.thread_id}`,
+        labels: ["ungrouped", "discord-thread"],
+        priority: "low",
+        metadata: {
+          thread_id: ungroupedThread.thread_id,
+          reason: ungroupedThread.reason,
+          top_issue: ungroupedThread.top_issue,
+        },
+      });
+      
+      // Store mapping for updating export status
+      (ungroupedThread as any)._exportIndex = ungroupedThreadIssueIndex;
+    }
+    
+    // STEP 3: Export ungrouped issues (GitHub issues that don't match any thread)
+    log(`Finding ungrouped GitHub issues (issues not matched to any thread)...`);
+    const ungroupedIssues: PMToolIssue[] = [];
+    
+    try {
+      // Get all GitHub issues from database
+      const { prisma } = await import("../storage/db/prisma.js");
+      const { getStorage } = await import("../storage/factory.js");
+      const storage = getStorage();
+      
+      // Get all issue numbers that have been matched to threads
+      const matchedIssues = await prisma.threadIssueMatch.findMany({
+        select: {
+          issueNumber: true,
+        },
+        distinct: ["issueNumber"],
+      });
+      
+      const matchedIssueNumbers = new Set(matchedIssues.map(i => i.issueNumber));
+      
+      // Load all issues from cache (this is our source of truth for all fetched issues)
+      const config = getConfig();
+      const issuesCachePath = join(process.cwd(), config.paths.cacheDir, config.paths.issuesCacheFile);
+      const { readFile } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+      
+      if (!existsSync(issuesCachePath)) {
+        log(`No issues cache found at ${issuesCachePath}. Skipping ungrouped issues export.`);
+      } else {
+        const issuesCacheContent = await readFile(issuesCachePath, "utf-8");
+        const issuesCache = JSON.parse(issuesCacheContent);
+        const allCachedIssues = issuesCache.issues || [];
+        
+        log(`Loaded ${allCachedIssues.length} issues from cache. ${matchedIssueNumbers.size} are matched to threads.`);
+        
+        // Find issues in cache that are NOT matched to any thread
+        // These are our ungrouped issues
+        for (const issue of allCachedIssues) {
+          if (!matchedIssueNumbers.has(issue.number)) {
+            // This issue doesn't have any thread matches - it's ungrouped
+            const issueTitle = issue.title || `GitHub Issue #${issue.number}`;
+            const title = `[Ungrouped Issue] ${issueTitle}`;
+            
+            const descriptionParts: string[] = [];
+            descriptionParts.push("## Problem Summary");
+            descriptionParts.push("");
+            descriptionParts.push(`This GitHub issue did not match any Discord threads.`);
+            descriptionParts.push("");
+            
+            if (issue.body) {
+              descriptionParts.push("---");
+              descriptionParts.push("");
+              descriptionParts.push("## Issue Description");
+              descriptionParts.push("");
+              descriptionParts.push(issue.body);
+              descriptionParts.push("");
+            }
+            
+            descriptionParts.push("---");
+            descriptionParts.push("");
+            descriptionParts.push("## GitHub Issue");
+            descriptionParts.push("");
+            if (issue.url) {
+              descriptionParts.push(`- [View Issue](${issue.url})`);
+            }
+            descriptionParts.push(`- **Number:** #${issue.number}`);
+            if (issue.state) {
+              descriptionParts.push(`- **State:** ${issue.state}`);
+            }
+            if (issue.labels && issue.labels.length > 0) {
+              descriptionParts.push(`- **Labels:** ${issue.labels.join(", ")}`);
+            }
+            if (issue.author) {
+              descriptionParts.push(`- **Author:** ${issue.author}`);
+            }
+            
+            // Try to match to features based on issue content
+            let featureId = "general";
+            let featureName = "General";
+            let projectId = projectMappings.get("general");
+            
+            // Simple keyword matching for feature assignment (could be enhanced with embeddings)
+            if (groupingData.features && groupingData.features.length > 0) {
+              const issueText = `${issue.title} ${issue.body || ""}`.toLowerCase();
+              for (const feature of groupingData.features) {
+                if (feature.name && issueText.includes(feature.name.toLowerCase())) {
+                  featureId = feature.id;
+                  featureName = feature.name;
+                  projectId = projectMappings.get(feature.id);
+                  break;
+                }
+              }
+            }
+            
+            ungroupedIssues.push({
+              title,
+              description: descriptionParts.join("\n"),
+              feature_id: featureId,
+              feature_name: featureName,
+              project_id: projectId,
+              source: "github",
+              source_url: issue.url || `https://github.com/issues/${issue.number}`,
+              source_id: `ungrouped-issue-${issue.number}`,
+              labels: ["ungrouped", "github-issue", ...(issue.labels || [])],
+              priority: issue.state === "closed" ? "low" : "medium",
+              metadata: {
+                issue_number: issue.number,
+                issue_state: issue.state,
+                issue_author: issue.author,
+              },
+            });
+            
+            // Save ungrouped issue to database
+            try {
+              // Try to use UngroupedIssue model (should exist in Prisma client if schema is up to date)
+              const ungroupedIssueModel = (prisma as any).ungroupedIssue;
+              if (ungroupedIssueModel) {
+                await ungroupedIssueModel.upsert({
+                  where: { issueNumber: issue.number },
+                  update: {
+                    issueTitle: issue.title || `Issue #${issue.number}`,
+                    issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
+                    issueState: issue.state || null,
+                    issueBody: issue.body || null,
+                    issueLabels: issue.labels || [],
+                    issueAuthor: issue.author || null,
+                    issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+                    exportStatus: "pending",
+                  },
+                  create: {
+                    issueNumber: issue.number,
+                    issueTitle: issue.title || `Issue #${issue.number}`,
+                    issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
+                    issueState: issue.state || null,
+                    issueBody: issue.body || null,
+                    issueLabels: issue.labels || [],
+                    issueAuthor: issue.author || null,
+                    issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+                    exportStatus: "pending",
+                  },
+                });
+              } else {
+                // Fallback: save to GitHubIssue table if UngroupedIssue model doesn't exist yet
+                // This can happen if Prisma client hasn't been regenerated after schema update
+                logError(`UngroupedIssue model not available in Prisma client. Please run 'npx prisma generate'. Saving to GitHubIssue table instead.`);
+                // Type assertion needed until Prisma client is regenerated
+                await (prisma as any).gitHubIssue.upsert({
+                  where: { issueNumber: issue.number },
+                  update: {
+                    issueTitle: issue.title || `Issue #${issue.number}`,
+                    issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
+                    issueState: issue.state || null,
+                    issueBody: issue.body || null,
+                    issueLabels: issue.labels || [],
+                    issueAuthor: issue.author || null,
+                    issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+                  },
+                  create: {
+                    issueNumber: issue.number,
+                    issueTitle: issue.title || `Issue #${issue.number}`,
+                    issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
+                    issueState: issue.state || null,
+                    issueBody: issue.body || null,
+                    issueLabels: issue.labels || [],
+                    issueAuthor: issue.author || null,
+                    issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
+                  },
+                });
+              }
+            } catch (dbError) {
+              logError(`Error saving ungrouped issue ${issue.number} to database:`, dbError);
+              // Continue even if database save fails
+            }
+          }
+        }
+        
+        log(`Found ${ungroupedIssues.length} ungrouped GitHub issues`);
+      }
+    } catch (error) {
+      logError("Error finding ungrouped issues:", error);
+      // Continue with export even if we can't find ungrouped issues
+    }
+    
+    // Add ungrouped issues to export list
+    pmIssues.push(...ungroupedIssues);
+    
     // Export to PM tool
-    log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type}...`);
+    log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type} (${groupsWithFeatures.length} groups, ${ungroupedThreads.length} ungrouped threads, ${ungroupedIssues.length} ungrouped issues)...`);
     const exportResult = await pmTool.exportIssues(pmIssues);
 
-    // Track which groups were exported (map source_id back to group.id)
+    // Track which items were exported and update their status
+    const ungroupedThreadToIssueMap = new Map<string, { id: string; url: string; identifier?: string }>();
+    const ungroupedIssueToIssueMap = new Map<number, { id: string; url: string; identifier?: string }>();
+    
     for (let i = 0; i < pmIssues.length; i++) {
       const issue = pmIssues[i];
-      const group = issueToGroupMap.get(i);
-      if (!group) continue;
       
-      if (issue.linear_issue_id) {
-        // Get URL from issue object (set by base class) or construct from identifier
-        const issueUrl = (issue as any).linear_issue_url || 
-          (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
-        
-        groupToIssueMap.set(group.id, {
-          id: issue.linear_issue_id,
-          url: issueUrl,
-          identifier: issue.linear_issue_identifier || undefined, // Linear identifier like "LIN-123"
-        });
+      // Check if this is a group
+      const group = issueToGroupMap.get(i);
+      if (group) {
+        if (issue.linear_issue_id) {
+          // Get URL from issue object (set by base class) or construct from identifier
+          const issueUrl = (issue as any).linear_issue_url || 
+            (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
+          
+          groupToIssueMap.set(group.id, {
+            id: issue.linear_issue_id,
+            url: issueUrl,
+            identifier: issue.linear_issue_identifier || undefined, // Linear identifier like "LIN-123"
+          });
+          
+          // Mark group as exported
+          group.status = "exported";
+          group.exported_at = new Date().toISOString();
+          group.linear_issue_id = issue.linear_issue_id;
+          group.linear_issue_url = issueUrl;
+          if (issue.linear_issue_identifier) {
+            group.linear_issue_identifier = issue.linear_issue_identifier;
+          }
+        }
+        continue;
       }
+      
+      // Check if this is an ungrouped thread
+      if (issue.source_id && issue.source_id.startsWith("ungrouped-thread-")) {
+        const threadId = issue.source_id.replace("ungrouped-thread-", "");
+        if (issue.linear_issue_id) {
+          const issueUrl = (issue as any).linear_issue_url || 
+            (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
+          
+          ungroupedThreadToIssueMap.set(threadId, {
+            id: issue.linear_issue_id,
+            url: issueUrl,
+            identifier: issue.linear_issue_identifier || undefined,
+          });
+          
+          // Update ungrouped thread in grouping data
+          const ungroupedThread = ungroupedThreads.find(ut => ut.thread_id === threadId);
+          if (ungroupedThread) {
+            (ungroupedThread as any).export_status = "exported";
+            (ungroupedThread as any).exported_at = new Date().toISOString();
+            (ungroupedThread as any).linear_issue_id = issue.linear_issue_id;
+            (ungroupedThread as any).linear_issue_url = issueUrl;
+            if (issue.linear_issue_identifier) {
+              (ungroupedThread as any).linear_issue_identifier = issue.linear_issue_identifier;
+            }
+          }
+        }
+        continue;
+      }
+      
+      // Check if this is an ungrouped issue
+      if (issue.source_id && issue.source_id.startsWith("ungrouped-issue-")) {
+        const issueNumber = parseInt(issue.source_id.replace("ungrouped-issue-", ""), 10);
+        if (!isNaN(issueNumber) && issue.linear_issue_id) {
+          const issueUrl = (issue as any).linear_issue_url || 
+            (issue.linear_issue_identifier ? `https://linear.app/${pmToolConfig.workspace_id || 'workspace'}/issue/${issue.linear_issue_identifier}` : '');
+          
+          ungroupedIssueToIssueMap.set(issueNumber, {
+            id: issue.linear_issue_id,
+            url: issueUrl,
+            identifier: issue.linear_issue_identifier || undefined,
+          });
+        }
+      }
+    }
+    
+    // Update database with export status
+    try {
+      const { prisma } = await import("../storage/db/prisma.js");
+      
+      // Update ungrouped threads in database
+      for (const [threadId, issueInfo] of ungroupedThreadToIssueMap.entries()) {
+        try {
+          // Use update with unique identifier (threadId is the primary key)
+          // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
+          // Run 'npx prisma generate' to regenerate client types
+          await prisma.ungroupedThread.update({
+            where: { threadId },
+            data: {
+              exportStatus: "exported",
+              exportedAt: new Date(),
+              linearIssueId: issueInfo.id,
+              linearIssueUrl: issueInfo.url,
+              linearIssueIdentifier: issueInfo.identifier || null,
+            } as any, // Cast entire data object - exportStatus field exists in schema
+          });
+        } catch (error) {
+          // If update fails (record might not exist), try upsert
+          try {
+            // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
+            await prisma.ungroupedThread.upsert({
+              where: { threadId },
+              update: {
+                exportStatus: "exported",
+                exportedAt: new Date(),
+                linearIssueId: issueInfo.id,
+                linearIssueUrl: issueInfo.url,
+                linearIssueIdentifier: issueInfo.identifier || null,
+              } as any, // Cast entire update object
+              create: {
+                threadId,
+                channelId: groupingData.channel_id,
+                reason: "no_matches", // Default reason
+                exportStatus: "exported",
+                exportedAt: new Date(),
+                linearIssueId: issueInfo.id,
+                linearIssueUrl: issueInfo.url,
+                linearIssueIdentifier: issueInfo.identifier || null,
+              } as any, // Cast entire create object
+            });
+          } catch (upsertError) {
+            logError(`Error updating ungrouped thread ${threadId} export status:`, upsertError);
+          }
+        }
+        
+        // Also update the classified_thread
+        try {
+          // Use update with unique identifier (threadId is the primary key)
+          // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
+          await prisma.classifiedThread.update({
+            where: { threadId },
+            data: {
+              exportStatus: "exported",
+              exportedAt: new Date(),
+              linearIssueId: issueInfo.id,
+              linearIssueUrl: issueInfo.url,
+              linearIssueIdentifier: issueInfo.identifier || null,
+            } as any, // Cast entire data object - exportStatus field exists in schema
+          });
+        } catch (error) {
+          // If update fails, log but don't fail - thread might not be classified yet
+          logError(`Error updating classified thread ${threadId} export status (thread may not exist):`, error);
+        }
+      }
+      
+      // Update ungrouped issues in database
+      for (const [issueNumber, issueInfo] of ungroupedIssueToIssueMap.entries()) {
+        try {
+          // Try to use UngroupedIssue model (should exist in Prisma client if schema is up to date)
+          const ungroupedIssueModel = (prisma as any).ungroupedIssue;
+          if (ungroupedIssueModel) {
+            await ungroupedIssueModel.upsert({
+              where: { issueNumber },
+              update: {
+                exportStatus: "exported",
+                exportedAt: new Date(),
+                linearIssueId: issueInfo.id,
+                linearIssueUrl: issueInfo.url,
+                linearIssueIdentifier: issueInfo.identifier || null,
+              },
+              create: {
+                issueNumber,
+                issueTitle: `Issue #${issueNumber}`, // Will be updated when we have full issue data
+                issueUrl: `https://github.com/issues/${issueNumber}`,
+                exportStatus: "exported",
+                exportedAt: new Date(),
+                linearIssueId: issueInfo.id,
+                linearIssueUrl: issueInfo.url,
+                linearIssueIdentifier: issueInfo.identifier || null,
+              },
+            });
+          } else {
+            // Fallback: update GitHubIssue model export status using update (single record)
+            // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
+            await (prisma as any).gitHubIssue.update({
+              where: { issueNumber },
+              data: {
+                exportStatus: "exported",
+                exportedAt: new Date(),
+                linearIssueId: issueInfo.id,
+                linearIssueUrl: issueInfo.url,
+                linearIssueIdentifier: issueInfo.identifier || null,
+              },
+            });
+          }
+        } catch (error) {
+          logError(`Error updating ungrouped issue ${issueNumber} export status:`, error);
+        }
+      }
+      
+      log(`Updated export status in database for ${ungroupedThreadToIssueMap.size} ungrouped threads and ${ungroupedIssueToIssueMap.size} ungrouped issues`);
+    } catch (error) {
+      logError("Error updating export status in database:", error);
+      // Continue even if database update fails
     }
 
     result.success = true;
@@ -451,12 +895,23 @@ export async function exportGroupingToPMTool(
     }
 
     log(`Export complete: ${exportResult.created_issues} created, ${exportResult.updated_issues} updated, ${exportResult.skipped_issues} skipped`);
+    log(`  - Groups: ${groupsWithFeatures.length}`);
+    log(`  - Ungrouped threads: ${ungroupedThreads.length}`);
+    log(`  - Ungrouped issues: ${ungroupedIssues.length}`);
 
-    // Return result with group export mappings for updating the JSON file
+    // Return result with export mappings for updating the JSON file
     return {
       ...result,
       group_export_mappings: Array.from(groupToIssueMap.entries()).map(([group_id, issue_info]) => ({
         group_id,
+        ...issue_info,
+      })),
+      ungrouped_thread_export_mappings: Array.from(ungroupedThreadToIssueMap.entries()).map(([thread_id, issue_info]) => ({
+        thread_id,
+        ...issue_info,
+      })),
+      ungrouped_issue_export_mappings: Array.from(ungroupedIssueToIssueMap.entries()).map(([issue_number, issue_info]) => ({
+        issue_number,
         ...issue_info,
       })),
     };

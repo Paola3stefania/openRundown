@@ -38,6 +38,12 @@ model ClassifiedThread {
   classifiedAt          DateTime @default(now()) @map("classified_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
   status                String   @default("completed") // 'pending' | 'classifying' | 'completed' | 'failed'
+  matchStatus           String?  @map("match_status") // 'matched' | 'below_threshold' | 'no_matches' | null (not classified yet)
+  exportStatus          String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt            DateTime? @map("exported_at")
+  linearIssueId         String?  @map("linear_issue_id")
+  linearIssueUrl        String?  @map("linear_issue_url")
+  linearIssueIdentifier String?  @map("linear_issue_identifier")
 
   channel      Channel             @relation(fields: [channelId], references: [id], onDelete: Cascade)
   issueMatches ThreadIssueMatch[]
@@ -47,6 +53,8 @@ model ClassifiedThread {
 
   @@index([channelId])
   @@index([status])
+  @@index([matchStatus])
+  @@index([exportStatus])
   @@map("classified_threads")
 }
 
@@ -93,6 +101,7 @@ model Group {
 
   channel      Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
   groupThreads GroupThread[]
+  githubIssues GitHubIssue[] // Issues in this group
 
   @@index([channelId])
   @@index([status])
@@ -124,6 +133,11 @@ model UngroupedThread {
   topIssueNumber      Int?     @map("top_issue_number")
   topIssueTitle       String?  @map("top_issue_title")
   topIssueSimilarity  Decimal? @map("top_issue_similarity") @db.Decimal(5, 2)
+  exportStatus        String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt          DateTime? @map("exported_at")
+  linearIssueId       String?  @map("linear_issue_id")
+  linearIssueUrl      String?  @map("linear_issue_url")
+  linearIssueIdentifier String? @map("linear_issue_identifier")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -132,6 +146,7 @@ model UngroupedThread {
 
   @@index([channelId])
   @@index([reason])
+  @@index([exportStatus])
   @@map("ungrouped_threads")
 }
 
@@ -149,6 +164,45 @@ model ClassificationHistory {
   @@map("classification_history")
 }
 
+model GitHubIssue {
+  issueNumber          Int      @id @map("issue_number")
+  issueTitle           String   @map("issue_title")
+  issueUrl             String   @map("issue_url")
+  issueState           String?  @map("issue_state")
+  issueBody            String?  @map("issue_body")
+  issueLabels          String[] @map("issue_labels")
+  issueAuthor          String?  @map("issue_author")
+  issueCreatedAt       DateTime? @map("issue_created_at")
+  issueUpdatedAt       DateTime? @map("issue_updated_at")
+  
+  // Group tracking
+  inGroup              Boolean  @default(false) @map("in_group")
+  groupId              String?  @map("group_id") // FK to groups table
+  
+  // Thread matching
+  matchedToThreads     Boolean  @default(false) @map("matched_to_threads")
+  
+  // Export status
+  exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt           DateTime? @map("exported_at")
+  linearIssueId        String?  @map("linear_issue_id")
+  linearIssueUrl       String?  @map("linear_issue_url")
+  linearIssueIdentifier String? @map("linear_issue_identifier")
+  
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  group                Group?   @relation(fields: [groupId], references: [id])
+  embedding            IssueEmbedding?
+
+  @@index([inGroup])
+  @@index([matchedToThreads])
+  @@index([exportStatus])
+  @@index([issueState])
+  @@index([groupId])
+  @@map("github_issues")
+}
+
 model IssueEmbedding {
   issueNumber Int      @id @map("issue_number")
   embedding   Json     // Array of floats (1536 dimensions)
@@ -156,6 +210,8 @@ model IssueEmbedding {
   model       String
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+
+  issue GitHubIssue @relation(fields: [issueNumber], references: [issueNumber], onDelete: Cascade)
 
   @@index([contentHash])
   @@index([model])
@@ -264,5 +320,27 @@ model FeatureEmbedding {
   @@index([contentHash])
   @@index([model])
   @@map("feature_embeddings")
+}
+
+model UngroupedIssue {
+  issueNumber          Int      @id @map("issue_number")
+  issueTitle           String   @map("issue_title")
+  issueUrl             String   @map("issue_url")
+  issueState           String?  @map("issue_state")
+  issueBody            String?  @map("issue_body")
+  issueLabels          String[] @map("issue_labels")
+  issueAuthor          String?  @map("issue_author")
+  issueCreatedAt       DateTime? @map("issue_created_at")
+  exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
+  exportedAt           DateTime? @map("exported_at")
+  linearIssueId        String?  @map("linear_issue_id")
+  linearIssueUrl       String?  @map("linear_issue_url")
+  linearIssueIdentifier String? @map("linear_issue_identifier")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@index([exportStatus])
+  @@index([issueState])
+  @@map("ungrouped_issues")
 }
 

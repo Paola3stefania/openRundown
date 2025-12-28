@@ -881,7 +881,49 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           issues: finalIssues,
         };
 
-        // Ensure cache directory exists
+        // Check if database is configured - save to database if available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        const useDatabase = hasDatabaseConfig();
+        
+        let savedToDatabase = false;
+        
+        if (useDatabase) {
+          // Save to database
+          try {
+            const storage = getStorage();
+            
+            // Check if database is actually available
+            const dbAvailable = await storage.isAvailable();
+            if (!dbAvailable) {
+              console.error(`[GitHub Issues] DATABASE_URL is set but database is not available. Falling back to JSON.`);
+            } else {
+              // Convert GitHub issues to database format
+              const issuesToSave = finalIssues.map((issue) => ({
+                number: issue.number,
+                title: issue.title,
+                url: issue.html_url,
+                state: issue.state,
+                body: issue.body || undefined,
+                labels: issue.labels.map((l) => l.name),
+                author: issue.user.login,
+                created_at: issue.created_at,
+                updated_at: issue.updated_at,
+              }));
+              
+              await storage.saveGitHubIssues(issuesToSave);
+              console.error(`[GitHub Issues] Saved ${issuesToSave.length} issues to database.`);
+              savedToDatabase = true;
+            }
+          } catch (dbError) {
+            console.error(`[GitHub Issues] Database save error (falling back to JSON):`, dbError);
+            // Fall through to JSON save
+          }
+        } else {
+          console.error(`[GitHub Issues] DATABASE_URL not set. Using JSON storage.`);
+        }
+
+        // Save to JSON file (always as fallback or if database not configured)
+        // JSON is kept for compatibility and as a backup
         const cacheDir = join(process.cwd(), githubConfig.paths.cacheDir);
         try {
           await mkdir(cacheDir, { recursive: true });
@@ -890,6 +932,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
+        
+        if (savedToDatabase) {
+          console.error(`[GitHub Issues] Also saved to JSON cache for compatibility.`);
+        }
 
         return {
           content: [
@@ -1104,14 +1150,34 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // Ensure cache directory exists
-        try {
-          await mkdir(cacheDir, { recursive: true });
-        } catch (error) {
-          // Directory might already exist
-        }
+        // Check if database is configured - save to database if available
+        // Note: Discord messages are primarily cached for classification, 
+        // but we still save JSON as fallback or for compatibility
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        const useDatabase = hasDatabaseConfig();
 
-        await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
+        // Save to JSON file (always as fallback or if database not configured)
+        // Discord messages are cached in JSON for classification processing
+        if (!useDatabase) {
+          // Ensure cache directory exists
+          try {
+            await mkdir(cacheDir, { recursive: true });
+          } catch (error) {
+            // Directory might already exist
+          }
+
+          await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
+        } else {
+          // When using database, we still save JSON for compatibility with classification tools
+          // but log that database is primary
+          try {
+            await mkdir(cacheDir, { recursive: true });
+          } catch (error) {
+            // Directory might already exist
+          }
+          await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
+          console.error(`[Discord Messages] Saved to JSON cache (database is primary for classification results).`);
+        }
 
         return {
           content: [
@@ -1605,50 +1671,69 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use semantic classification by default when OpenAI is available (issues are always cached now)
       const useSemantic = classifyConfig.classification.useSemantic;
 
-      // Determine output file path BEFORE processing (so we can save incrementally)
-      // Find the file with the MOST threads to merge into (not just most recent)
-      const existingFiles = await readdir(resultsDir).catch(() => []);
-      const matchingFiles = existingFiles
-        .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
+      // Check if database is configured - only use JSON files if not using database
+      const { hasDatabaseConfig } = await import("../storage/factory.js");
+      const useDatabase = hasDatabaseConfig();
       
-      let outputPath: string;
+      let outputPath: string | undefined;
       let existingClassifiedThreads: any[] = [];
-      let bestFile: string | null = null;
-      let maxThreads = 0;
       
-      // Find file with most threads
-      for (const file of matchingFiles) {
-        try {
-          const filePath = join(resultsDir, file);
-          const content = await readFile(filePath, "utf-8");
-          const parsed = safeJsonParse(content, filePath);
-          const threadCount = parsed.classified_threads?.length || 0;
-          
-          if (threadCount > maxThreads) {
-            maxThreads = threadCount;
-            bestFile = file;
+      // Only load existing JSON files if NOT using database
+      if (!useDatabase) {
+        // Determine output file path BEFORE processing (so we can save incrementally)
+        // Find the file with the MOST threads to merge into (not just most recent)
+        const existingFiles = await readdir(resultsDir).catch(() => []);
+        const matchingFiles = existingFiles
+          .filter(f => f.startsWith(`discord-classified-`) && f.includes(actualChannelId) && f.endsWith('.json'));
+        
+        let bestFile: string | null = null;
+        let maxThreads = 0;
+        
+        // Find file with most threads
+        for (const file of matchingFiles) {
+          try {
+            const filePath = join(resultsDir, file);
+            const content = await readFile(filePath, "utf-8");
+            const parsed = safeJsonParse(content, filePath);
+            const threadCount = parsed.classified_threads?.length || 0;
+            
+            if (threadCount > maxThreads) {
+              maxThreads = threadCount;
+              bestFile = file;
+            }
+          } catch {
+            continue;
           }
-        } catch {
-          continue;
         }
-      }
-      
-      if (bestFile) {
-        outputPath = join(resultsDir, bestFile);
-        try {
-          const existingContent = await readFile(outputPath, "utf-8");
-          const existingData = safeJsonParse(existingContent, outputPath);
-          existingClassifiedThreads = existingData.classified_threads || [];
-          console.error(`[Classification] Will merge into existing file: ${bestFile} (${existingClassifiedThreads.length} threads)`);
-        } catch {
-          // If can't read, create new
+        
+        if (bestFile) {
+          outputPath = join(resultsDir, bestFile);
+          try {
+            const existingContent = await readFile(outputPath, "utf-8");
+            const existingData = safeJsonParse(existingContent, outputPath);
+            existingClassifiedThreads = existingData.classified_threads || [];
+            console.error(`[Classification] Will merge into existing file: ${bestFile} (${existingClassifiedThreads.length} threads)`);
+          } catch {
+            // If can't read, create new
+            const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
+            outputPath = join(resultsDir, `discord-classified-${safeChannelName}-${actualChannelId}-${Date.now()}.json`);
+          }
+        } else {
           const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
           outputPath = join(resultsDir, `discord-classified-${safeChannelName}-${actualChannelId}-${Date.now()}.json`);
+          console.error(`[Classification] Creating new file: ${outputPath}`);
         }
       } else {
-        const safeChannelName = (channelName || actualChannelId).replace("#", "").replace(/[^a-z0-9]/gi, "-");
-        outputPath = join(resultsDir, `discord-classified-${safeChannelName}-${actualChannelId}-${Date.now()}.json`);
-        console.error(`[Classification] Creating new file: ${outputPath}`);
+        // Using database - load existing threads from database instead
+        try {
+          const { getStorage } = await import("../storage/factory.js");
+          const storage = getStorage();
+          const existingThreads = await storage.getClassifiedThreads(actualChannelId);
+          existingClassifiedThreads = existingThreads;
+          console.error(`[Classification] Loaded ${existingThreads.length} existing threads from database`);
+        } catch (dbError) {
+          console.error(`[Classification] Could not load from database (continuing):`, dbError);
+        }
       }
 
       // Map to track all classified threads (existing + new)
@@ -1659,7 +1744,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Helper to save current progress to JSON file
+      // Only save to JSON if database is NOT configured
       const saveProgressToFile = async (newlyClassifiedCount: number) => {
+        // Only save to JSON file if database is NOT configured
+        if (useDatabase || !outputPath) {
+          return; // Data is saved to database, skip JSON file
+        }
+        
         const mergedThreads = Array.from(threadMap.values());
         const result = {
           channel_id: actualChannelId,
@@ -1690,7 +1781,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           updateThreadStatus(updatedHistory, threadId, actualChannelId, "classifying");
         });
 
-        // Save intermediate status (classifying)
+        // Save intermediate status (classifying) - saves to DB if configured, otherwise JSON
         await saveClassificationHistory(updatedHistory, resultsDir);
 
         try {
@@ -1794,8 +1885,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           allClassified.push(...batchClassified);
 
-          // Save progress after each batch (both history AND JSON file)
+          // Save progress after each batch
+          // History saves to DB if configured, otherwise JSON
           await saveClassificationHistory(updatedHistory, resultsDir);
+          // JSON file only if database not configured
           await saveProgressToFile(allClassified.length);
           
           // Save to database if configured (batch write)
@@ -1910,16 +2003,26 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         classified_threads: mergedThreads,
       };
 
+      // Build response message
+      let message: string;
+      if (useDatabase) {
+        message = classified.length > 0 
+          ? `Classified ${classified.length} new threads. Total: ${mergedThreads.length}. Saved to database.`
+          : `No new threads to classify. Database has ${mergedThreads.length} classified threads.`;
+      } else {
+        message = classified.length > 0 
+          ? `Classified ${classified.length} new threads. Total in file: ${mergedThreads.length}. Saved to: ${outputPath}`
+          : `No new threads to classify. File has ${mergedThreads.length} classified threads. File: ${outputPath}`;
+      }
+
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify({
               ...result,
-              output_file: outputPath,
-              message: classified.length > 0 
-                ? `Classified ${classified.length} new threads. Total in file: ${mergedThreads.length}. Saved to: ${outputPath}`
-                : `No new threads to classify. File has ${mergedThreads.length} classified threads. File: ${outputPath}`,
+              ...(useDatabase ? {} : { output_file: outputPath }),
+              message,
             }, null, 2),
           },
         ],
@@ -2127,28 +2230,48 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           result = await exportGroupingToPMTool(groupingData, pmToolConfig);
           
           // Update grouping JSON file with export status and suggested titles
-          if (result.success && result.group_export_mappings) {
+          if (result.success) {
             // Update groups with export status
-            const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
-            
-            for (const group of groupingData.groups) {
-              const mapping = exportMappings.get(group.id);
-              if (mapping) {
-                // Mark as exported
-                group.status = "exported";
-                group.exported_at = new Date().toISOString();
-                group.linear_issue_id = mapping.id;
-                group.linear_issue_url = mapping.url;
+            if (result.group_export_mappings) {
+              const exportMappings = new Map(result.group_export_mappings.map(m => [m.group_id, m]));
+              
+              for (const group of groupingData.groups) {
+                const mapping = exportMappings.get(group.id);
+                if (mapping) {
+                  // Mark as exported
+                  group.status = "exported";
+                  group.exported_at = new Date().toISOString();
+                  group.linear_issue_id = mapping.id;
+                  group.linear_issue_url = mapping.url;
+                  
+                  // Store identifier if available (e.g., "LIN-123")
+                  if (mapping.identifier) {
+                    (group as any).linear_issue_identifier = mapping.identifier;
+                  }
+                }
                 
-                // Store identifier if available (e.g., "LIN-123")
-                if (mapping.identifier) {
-                  (group as any).linear_issue_identifier = mapping.identifier;
+                // Ensure suggested_title is set (should already be set by exporter, but double-check)
+                if (!group.suggested_title) {
+                  group.suggested_title = group.github_issue?.title || "Untitled Group";
                 }
               }
+            }
+            
+            // Update ungrouped threads with export status
+            if (result.ungrouped_thread_export_mappings && groupingData.ungrouped_threads) {
+              const threadMappings = new Map(result.ungrouped_thread_export_mappings.map(m => [m.thread_id, m]));
               
-              // Ensure suggested_title is set (should already be set by exporter, but double-check)
-              if (!group.suggested_title) {
-                group.suggested_title = group.github_issue?.title || "Untitled Group";
+              for (const ungroupedThread of groupingData.ungrouped_threads) {
+                const mapping = threadMappings.get(ungroupedThread.thread_id);
+                if (mapping) {
+                  (ungroupedThread as any).export_status = "exported";
+                  (ungroupedThread as any).exported_at = new Date().toISOString();
+                  (ungroupedThread as any).linear_issue_id = mapping.id;
+                  (ungroupedThread as any).linear_issue_url = mapping.url;
+                  if (mapping.identifier) {
+                    (ungroupedThread as any).linear_issue_identifier = mapping.identifier;
+                  }
+                }
               }
             }
             
@@ -2487,23 +2610,52 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               classified_threads: classifiedThreads,
             };
             
-            // Save classification results
-            const classificationOutputPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
-            await writeFile(classificationOutputPath, JSON.stringify({
-              channel_id: actualChannelId,
-              channel_name: "auto-classified",
-              analysis_date: new Date().toISOString(),
-              summary: {
-                total_messages: classifierMessages.length,
-                classified_count: classified.length,
-                thread_count: classifiedThreads.length,
-                coverage_percentage: classifierMessages.length > 0 ? (classified.length / classifierMessages.length) * 100 : 0,
-                newly_classified: classified.length,
-              },
-              classified_threads: classifiedThreads,
-            }, null, 2), "utf-8");
+            // Save classification results (only to JSON if database not configured)
+            const { hasDatabaseConfig } = await import("../storage/factory.js");
+            const useDatabase = hasDatabaseConfig();
             
-            console.error(`[Grouping] Classification complete: ${classifiedThreads.length} threads. Saved to ${classificationOutputPath}`);
+            if (!useDatabase) {
+              const classificationOutputPath = join(resultsDir, `discord-classified-${actualChannelId}.json`);
+              await writeFile(classificationOutputPath, JSON.stringify({
+                channel_id: actualChannelId,
+                channel_name: "auto-classified",
+                analysis_date: new Date().toISOString(),
+                summary: {
+                  total_messages: classifierMessages.length,
+                  classified_count: classified.length,
+                  thread_count: classifiedThreads.length,
+                  coverage_percentage: classifierMessages.length > 0 ? (classified.length / classifierMessages.length) * 100 : 0,
+                  newly_classified: classified.length,
+                },
+                classified_threads: classifiedThreads,
+              }, null, 2), "utf-8");
+              
+              console.error(`[Grouping] Classification complete: ${classifiedThreads.length} threads. Saved to ${classificationOutputPath}`);
+            } else {
+              // Save to database instead
+              const { getStorage } = await import("../storage/factory.js");
+              const storage = getStorage();
+              
+              // Convert to ClassifiedThread format and save
+              const threadsToSave = classifiedThreads.map((thread: any) => ({
+                thread_id: thread.thread_id,
+                channel_id: actualChannelId,
+                thread_name: thread.thread_name,
+                message_count: thread.message_count || 1,
+                first_message_id: thread.first_message_id || "",
+                first_message_author: thread.first_message_author,
+                first_message_timestamp: thread.first_message_timestamp,
+                first_message_url: thread.first_message_url,
+                classified_at: new Date().toISOString(),
+                status: "completed" as const,
+                issues: thread.issues || [],
+              }));
+              
+              if (threadsToSave.length > 0) {
+                await storage.saveClassifiedThreads(threadsToSave);
+                console.error(`[Grouping] Classification complete: ${classifiedThreads.length} threads. Saved to database.`);
+              }
+            }
           }
         }
 

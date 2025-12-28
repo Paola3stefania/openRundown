@@ -14,6 +14,12 @@ export interface ClassifiedThread {
   first_message_url?: string;
   classified_at: string;
   status: "pending" | "classifying" | "completed" | "failed";
+  match_status?: "matched" | "below_threshold" | "no_matches" | null; // Classification match status
+  export_status?: "pending" | "exported" | null; // Export status
+  exported_at?: string;
+  linear_issue_id?: string;
+  linear_issue_url?: string;
+  linear_issue_identifier?: string;
   issues: Array<{
     number: number;
     title: string;
@@ -62,6 +68,11 @@ export interface UngroupedThread {
   author?: string;
   timestamp?: string;
   reason: "no_matches" | "below_threshold";
+  export_status?: "pending" | "exported" | null; // Export status
+  exported_at?: string;
+  linear_issue_id?: string;
+  linear_issue_url?: string;
+  linear_issue_identifier?: string;
   top_issue?: {
     number: number;
     title: string;

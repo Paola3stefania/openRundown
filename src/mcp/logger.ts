@@ -1,6 +1,6 @@
 /**
  * Logging utility for MCP server
- * Uses console.log for cleaner output
+ * Uses console.error for all output to avoid interfering with MCP JSON protocol on stdout
  * Optionally writes to log file if MCP_LOG_FILE env var is set
  */
 
@@ -38,7 +38,8 @@ async function writeToLogFile(level: string, ...args: any[]): Promise<void> {
 }
 
 export function log(...args: any[]): void {
-  console.log(...args);
+  // Use console.error to avoid interfering with MCP JSON protocol on stdout
+  console.error(...args);
   writeToLogFile('INFO', ...args).catch(() => {});
 } 
 

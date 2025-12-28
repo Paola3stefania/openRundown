@@ -44,6 +44,47 @@ export interface IStorage {
   saveClassificationHistoryEntry(channelId: string, messageId: string, threadId?: string): Promise<void>;
   getClassificationHistory(channelId: string): Promise<Array<{ message_id: string; thread_id?: string; classified_at: string }>>;
   
+  // GitHub issues operations
+  saveGitHubIssue(issue: {
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }): Promise<void>;
+  saveGitHubIssues(issues: Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+  }>): Promise<void>;
+  getGitHubIssues(options?: {
+    inGroup?: boolean;
+    matchedToThreads?: boolean;
+    state?: string;
+  }): Promise<Array<{
+    number: number;
+    title: string;
+    url: string;
+    state?: string;
+    body?: string;
+    labels?: string[];
+    author?: string;
+    created_at?: string;
+    updated_at?: string;
+    in_group?: boolean;
+    matched_to_threads?: boolean;
+  }>>;
+  
   // Stats
   getStats(channelId: string): Promise<StorageStats>;
   
