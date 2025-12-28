@@ -712,12 +712,59 @@ export async function computeAndSaveThreadEmbeddings(
     }
   }
 
-  console.error(`[Embeddings] Found ${allThreads.length} threads, ${threadsToEmbed.length} need embeddings`);
+  // Also handle standalone messages (messages not in threads)
+  // Treat each standalone message as a single-message thread (using message ID as thread ID)
+  const standaloneMessages = await prisma.discordMessage.findMany({
+    where: { 
+      threadId: null,
+      // Only get messages that are not already classified as threads
+      // (i.e., their message ID is not already a thread ID)
+      id: {
+        notIn: allThreads.map(t => t.threadId),
+      },
+      // Filter by channel if specified
+      ...(options?.channelId ? { channelId: options.channelId } : {}),
+    },
+    select: { 
+      id: true,
+      content: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  console.error(`[Embeddings] Found ${standaloneMessages.length} standalone messages`);
+
+  let standaloneCached = 0;
+  let threadsNeedingEmbedding = threadsToEmbed.length;
+  
+  for (const message of standaloneMessages) {
+    // Use message ID as thread ID for standalone messages (consistent with classification)
+    const threadId = message.id;
+    const messageContent = message.content;
+    const currentHash = hashContent(messageContent);
+    const existingHash = existingHashes.get(threadId);
+
+    if (!existingHash || existingHash !== currentHash) {
+      threadsToEmbed.push({
+        threadId: threadId,
+        threadName: `Standalone Message: ${messageContent.substring(0, 50)}...`,
+        content: messageContent,
+      });
+    } else {
+      standaloneCached++;
+    }
+  }
+
+  const totalItems = allThreads.length + standaloneMessages.length;
+  const threadCached = allThreads.length - threadsNeedingEmbedding;
+  const totalCached = threadCached + standaloneCached;
+  
+  console.error(`[Embeddings] Found ${allThreads.length} threads and ${standaloneMessages.length} standalone messages, ${threadsToEmbed.length} need embeddings`);
 
   // Process in batches using batch embedding API
   const batchSize = 25; // Threads can be long, use smaller batches
   let processed = 0;
-  let cached = allThreads.length - threadsToEmbed.length;
+  let cached = totalCached;
   let retryCount = 0;
 
   for (let i = 0; i < threadsToEmbed.length; i += batchSize) {
@@ -804,7 +851,7 @@ export async function computeAndSaveThreadEmbeddings(
   }
 
   console.error(`[Embeddings] Completed thread embeddings: ${processed}/${threadsToEmbed.length} computed, ${cached} cached`);
-  return { computed: processed, cached, total: allThreads.length };
+  return { computed: processed, cached, total: totalItems };
 }
 
 /**
