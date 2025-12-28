@@ -759,32 +759,59 @@ export async function computeAndSaveThreadEmbeddings(
     if (messagesToCreate.length > 0) {
       console.error(`[Embeddings] Creating ${messagesToCreate.length} ClassifiedThread entries for standalone messages`);
       
-      // Use individual upserts in a transaction to handle special characters
-      await prisma.$transaction(async (tx) => {
-        await Promise.all(
-          messagesToCreate.map(message => {
-            // Sanitize thread name - limit length and handle special characters
-            const threadName = `Standalone Message: ${(message.content || '').substring(0, 50).replace(/\0/g, '')}...`;
-            
-            return tx.classifiedThread.upsert({
-              where: { threadId: message.id },
-              update: {},
-              create: {
-                threadId: message.id,
-                channelId: message.channelId,
-                threadName: threadName,
-                messageCount: 1,
-                firstMessageId: message.id,
-                firstMessageAuthor: message.authorUsername || null,
-                firstMessageTimestamp: message.createdAt,
-                firstMessageUrl: message.url || null,
-                status: "completed",
-                matchStatus: null,
-              },
-            });
-          })
-        );
-      });
+      // Use individual upserts with error handling for problematic messages
+      let createdCount = 0;
+      let failedCount = 0;
+      
+      // Helper function to safely sanitize string for database
+      function sanitizeForDB(str: string, maxLength: number = 100): string {
+        if (!str) return '';
+        return str
+          .replace(/\\/g, '') // Remove backslashes (can cause escape sequence issues)
+          .replace(/\0/g, '') // Remove null bytes
+          .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '') // Remove control characters
+          .replace(/[\uFFFE-\uFFFF]/g, '') // Remove invalid UTF-16 characters
+          .normalize('NFKC') // Normalize unicode
+          .substring(0, maxLength)
+          .trim();
+      }
+      
+      for (const message of messagesToCreate) {
+        try {
+          // Use a simple thread name without including message content to avoid escape sequence issues
+          // The content will still be embedded, just not in the thread name
+          const threadName = `Standalone Message ${message.id.substring(0, 8)}`;
+          
+          // Sanitize author username if present
+          const sanitizedAuthor = message.authorUsername ? sanitizeForDB(message.authorUsername, 50) : null;
+          
+          await prisma.classifiedThread.upsert({
+            where: { threadId: message.id },
+            update: {},
+            create: {
+              threadId: message.id,
+              channelId: message.channelId,
+              threadName: threadName,
+              messageCount: 1,
+              firstMessageId: message.id,
+              firstMessageAuthor: sanitizedAuthor,
+              firstMessageTimestamp: message.createdAt,
+              firstMessageUrl: message.url || null,
+              status: "completed",
+              matchStatus: null,
+            },
+          });
+          createdCount++;
+        } catch (error) {
+          console.error(`[Embeddings] Failed to create ClassifiedThread for standalone message ${message.id}:`, error instanceof Error ? error.message : error);
+          failedCount++;
+          // Continue with other messages
+        }
+      }
+      
+      if (failedCount > 0) {
+        console.error(`[Embeddings] Created ${createdCount} ClassifiedThread entries, ${failedCount} failed`);
+      }
     }
   }
 
