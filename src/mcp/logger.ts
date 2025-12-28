@@ -21,7 +21,7 @@ if (LOG_TO_FILE && LOG_FILE) {
   }
 }
 
-async function writeToLogFile(level: string, ...args: any[]): Promise<void> {
+async function writeToLogFile(level: string, ...args: unknown[]): Promise<void> {
   if (!LOG_TO_FILE || !LOG_FILE) return;
   
   try {
@@ -37,18 +37,18 @@ async function writeToLogFile(level: string, ...args: any[]): Promise<void> {
   }
 }
 
-export function log(...args: any[]): void {
+export function log(...args: unknown[]): void {
   // Use console.error to avoid interfering with MCP JSON protocol on stdout
   console.error(...args);
   writeToLogFile('INFO', ...args).catch(() => {});
 } 
 
-export function logError(...args: any[]): void {
+export function logError(...args: unknown[]): void {
   console.error(...args);
   writeToLogFile('ERROR', ...args).catch(() => {});
 }
 
-export function logWarn(...args: any[]): void {
+export function logWarn(...args: unknown[]): void {
   console.warn(...args);
   writeToLogFile('WARN', ...args).catch(() => {});
 }

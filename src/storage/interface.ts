@@ -4,6 +4,7 @@
 
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "./types.js";
 import type { DocumentationContent } from "../export/documentationFetcher.js";
+import type { ProductFeature } from "../export/types.js";
 
 export interface IStorage {
   // Channel operations
@@ -36,8 +37,8 @@ export interface IStorage {
   clearDocumentationCache(): Promise<void>;
   
   // Feature cache operations
-  saveFeatures(urls: string[], features: any[], docCount: number): Promise<void>;
-  getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null>;
+  saveFeatures(urls: string[], features: ProductFeature[], docCount: number): Promise<void>;
+  getFeatures(urls: string[]): Promise<{ features: ProductFeature[]; extracted_at: string; documentation_count: number } | null>;
   clearFeaturesCache(): Promise<void>;
   
   // Classification history operations

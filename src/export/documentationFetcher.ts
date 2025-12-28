@@ -125,11 +125,11 @@ Preserve the logical structure and hierarchy of the content.`
     const title = parsed.title ? cleanText(parsed.title) : undefined;
     const contentText = cleanText(parsed.content || "");
     const sections = parsed.sections && Array.isArray(parsed.sections)
-      ? parsed.sections.map((section: any) => ({
+      ? parsed.sections.map((section: { title?: string; content?: string }) => ({
           title: cleanText(section.title || ""),
           content: cleanText(section.content || ""),
           url: `${url}#${(section.title || "").toLowerCase().replace(/\s+/g, "-")}`,
-        })).filter((s: any) => s.title && s.content)
+        })).filter((s: { title: string; content: string; url: string }): s is { title: string; content: string; url: string } => !!s.title && !!s.content)
       : undefined;
 
     return {

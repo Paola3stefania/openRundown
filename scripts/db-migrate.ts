@@ -36,8 +36,8 @@ async function runMigrations() {
       throw new Error("Could not connect to database");
     }
     console.log("Database connection successful!\n");
-  } catch (error: any) {
-    console.error("ERROR: Failed to connect to database:", error.message);
+  } catch (error: unknown) {
+    console.error("ERROR: Failed to connect to database:", error instanceof Error ? error.message : String(error));
     console.error("\nPlease check your DATABASE_URL or DB_* environment variables.");
     
     // Show what's configured
@@ -71,8 +71,8 @@ async function runMigrations() {
     migrationFiles = files
       .filter(f => f.endsWith(".sql"))
       .sort(); // Sort alphabetically (001, 002, etc.)
-  } catch (error: any) {
-    console.error(`ERROR: Failed to read migrations directory: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`ERROR: Failed to read migrations directory: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 
@@ -94,12 +94,12 @@ async function runMigrations() {
       const migrationSQL = await readFile(migrationPath, "utf-8");
       await query(migrationSQL);
       console.log(`   OK: ${migrationFile} completed\n`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Some errors are expected (e.g., table already exists)
-      if (error.message.includes("already exists") || error.code === "42P07" || error.code === "42710") {
+      if ((error instanceof Error && error.message.includes("already exists")) || (error && typeof error === "object" && "code" in error && (error.code === "42P07" || error.code === "42710"))) {
         console.log(`   WARNING: ${migrationFile}: Some objects already exist (skipping)`);
       } else {
-        console.error(`   ERROR: ${migrationFile} failed: ${error.message}`);
+        console.error(`   ERROR: ${migrationFile} failed: ${error instanceof Error ? error.message : String(error)}`);
         console.error(`\nFull error:`, error);
         process.exit(1);
       }
@@ -115,13 +115,13 @@ async function runMigrations() {
       ORDER BY table_name
     `);
     
-    const tables = tablesResult.rows.map((r: any) => r.table_name);
+    const tables = (tablesResult.rows as Array<{ table_name: string }>).map((r) => r.table_name);
     console.log(`Database tables (${tables.length} total):`);
     tables.forEach((table: string) => {
       console.log(`   - ${table}`);
     });
-  } catch (error: any) {
-    console.error(`WARNING: Could not verify tables: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`WARNING: Could not verify tables: ${error instanceof Error ? error.message : String(error)}`);
   }
   
   console.log(`\nDatabase setup complete!`);

@@ -8,7 +8,6 @@ import { extractFeaturesFromDocumentation } from "./featureExtractor.js";
 import { mapToFeatures } from "./featureMapper.js";
 import { createPMTool, validatePMToolConfig } from "./factory.js";
 import { PMToolConfig, PMToolIssue, ProductFeature, FeatureMapping, ProjectMapping } from "./types.js";
-import { join } from "path";
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 
@@ -110,7 +109,7 @@ export async function runExportWorkflow(
 
     // Step 4: Map to features
     log("Mapping Discord messages/issues to features...");
-    const featureMappings = await mapToFeatures(features, classifiedData);
+    const featureMappings = await mapToFeatures(features, classifiedData) as FeatureMapping[];
     result.features_mapped = featureMappings.length;
 
     // Step 5: Create/ensure Linear Projects exist (for Linear only)

@@ -9,6 +9,7 @@ import { join } from "path";
 import { createHash } from "crypto";
 import { getConfig } from "../../config/index.js";
 import { prisma, checkPrismaConnection } from "../db/prisma.js";
+import type { Prisma } from "@prisma/client";
 
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 export type Embedding = number[];
@@ -212,6 +213,35 @@ export async function getCachedEmbedding(
     }
   }
   
+  // For thread embeddings, try database first if available
+  if (cacheType === "discord" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      const result = await prisma.threadEmbedding.findUnique({
+        where: { threadId: id },
+        select: {
+          embedding: true,
+          contentHash: true,
+          model: true,
+        },
+      });
+      
+      if (result && result.model === currentModel) {
+        if (result.contentHash === contentHash) {
+          // Content matches, use cached embedding
+          const embedding = result.embedding as number[];
+          memoryCache.set(memKey, embedding);
+          return embedding;
+        }
+        // Content hash mismatch means thread changed, return undefined to re-embed
+        return undefined;
+      }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database error, falling back to JSON:`, error);
+    }
+  }
+  
   // Fall back to disk cache (or for discord embeddings)
   const cache = loadCache(cacheType);
   const entry = cache.entries[id];
@@ -247,19 +277,44 @@ export async function setCachedEmbedding(
         await prisma.issueEmbedding.upsert({
           where: { issueNumber },
           update: {
-            embedding: embedding as any,
+            embedding: embedding as Prisma.InputJsonValue,
             contentHash,
             model: currentModel,
           },
           create: {
             issueNumber,
-            embedding: embedding as any,
+            embedding: embedding as Prisma.InputJsonValue,
             contentHash,
             model: currentModel,
           },
         });
         return; // Successfully saved to database, skip JSON cache
       }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database save error, falling back to JSON:`, error);
+    }
+  }
+  
+  // For thread embeddings, save to database first if available
+  if (cacheType === "discord" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      await prisma.threadEmbedding.upsert({
+        where: { threadId: id },
+        update: {
+          embedding: embedding as Prisma.InputJsonValue,
+          contentHash,
+          model: currentModel,
+        },
+        create: {
+          threadId: id,
+          embedding: embedding as Prisma.InputJsonValue,
+          contentHash,
+          model: currentModel,
+        },
+      });
+      return; // Successfully saved to database, skip JSON cache
     } catch (error) {
       // Database error, fall back to JSON cache
       console.error(`[EmbeddingCache] Database save error, falling back to JSON:`, error);
@@ -303,13 +358,52 @@ export async function batchSetCachedEmbeddings(
             return tx.issueEmbedding.upsert({
               where: { issueNumber },
               update: {
-                embedding: item.embedding as any,
+                embedding: item.embedding as Prisma.InputJsonValue,
                 contentHash: item.contentHash,
                 model: currentModel,
               },
               create: {
                 issueNumber,
-                embedding: item.embedding as any,
+                embedding: item.embedding as Prisma.InputJsonValue,
+                contentHash: item.contentHash,
+                model: currentModel,
+              },
+            });
+          }));
+        });
+        return; // Successfully saved to database, skip JSON cache
+      }
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database batch save error, falling back to JSON:`, error);
+    }
+  }
+  
+  // For thread embeddings, save to database first if available
+  if (cacheType === "discord" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      
+      if (items.length > 0) {
+        // Save to memory cache
+        for (const item of items) {
+          const memKey = `${cacheType}:${item.id}`;
+          memoryCache.set(memKey, item.embedding);
+        }
+        
+        // Batch save in a single transaction
+        await prisma.$transaction(async (tx) => {
+          await Promise.all(items.map((item) => {
+            return tx.threadEmbedding.upsert({
+              where: { threadId: item.id },
+              update: {
+                embedding: item.embedding as Prisma.InputJsonValue,
+                contentHash: item.contentHash,
+                model: currentModel,
+              },
+              create: {
+                threadId: item.id,
+                embedding: item.embedding as Prisma.InputJsonValue,
                 contentHash: item.contentHash,
                 model: currentModel,
               },
@@ -365,6 +459,35 @@ export async function getAllCachedEmbeddings(
       const embeddingsMap = new Map<string, Embedding>();
       for (const row of embeddings) {
         const id = row.issueNumber.toString();
+        const embedding = row.embedding as number[];
+        embeddingsMap.set(id, embedding);
+        // Also populate memory cache
+        const memKey = `${cacheType}:${id}`;
+        memoryCache.set(memKey, embedding);
+      }
+      
+      return embeddingsMap;
+    } catch (error) {
+      // Database error, fall back to JSON cache
+      console.error(`[EmbeddingCache] Database load error, falling back to JSON:`, error);
+    }
+  }
+  
+  // For thread embeddings, load from database first if available
+  if (cacheType === "discord" && await isDatabaseAvailable()) {
+    try {
+      const currentModel = getEmbeddingModel();
+      const embeddings = await prisma.threadEmbedding.findMany({
+        where: { model: currentModel },
+        select: {
+          threadId: true,
+          embedding: true,
+        },
+      });
+      
+      const embeddingsMap = new Map<string, Embedding>();
+      for (const row of embeddings) {
+        const id = row.threadId;
         const embedding = row.embedding as number[];
         embeddingsMap.set(id, embedding);
         // Also populate memory cache

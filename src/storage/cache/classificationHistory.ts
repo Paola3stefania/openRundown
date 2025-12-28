@@ -71,8 +71,82 @@ export function getHistoryPath(resultsDir: string): string {
 
 /**
  * Load classification history
+ * Loads from database if available, otherwise from JSON file
  */
-export async function loadClassificationHistory(resultsDir: string): Promise<ClassificationHistory> {
+export async function loadClassificationHistory(resultsDir: string, channelId?: string): Promise<ClassificationHistory> {
+  // Check if database is available
+  const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+
+  if (hasDatabase && channelId) {
+    try {
+      const { getStorage } = await import("../factory.js");
+      const storage = getStorage();
+      const dbAvailable = await storage.isAvailable();
+      
+      if (dbAvailable) {
+        // Load classification history from database
+        const dbHistory = await storage.getClassificationHistory(channelId);
+        
+        // Load all classified threads for this channel to get full details
+        const dbThreads = await storage.getClassifiedThreads(channelId);
+        
+        // Convert database format to ClassificationHistory format
+        const history: ClassificationHistory = {
+          last_updated: new Date().toISOString(),
+          messages: {},
+          channel_classifications: {
+            [channelId]: [],
+          },
+          threads: {},
+        };
+        
+        // Build message map from history entries
+        for (const entry of dbHistory) {
+          if (entry.message_id) {
+            history.messages[entry.message_id] = {
+              message_id: entry.message_id,
+              channel_id: channelId,
+              classified_at: entry.classified_at,
+              issues_matched: [], // Will be populated from thread if available
+            };
+            
+            if (!history.channel_classifications[channelId].includes(entry.message_id)) {
+              history.channel_classifications[channelId].push(entry.message_id);
+            }
+          }
+        }
+        
+        // Build threads map from classified threads
+        for (const thread of dbThreads) {
+          history.threads[thread.thread_id] = {
+            thread_id: thread.thread_id,
+            channel_id: thread.channel_id,
+            classified_at: thread.classified_at,
+            status: thread.status,
+            issues_matched: thread.issues.map(i => ({
+              issue_number: i.number,
+              similarity_score: i.similarity_score,
+            })),
+          };
+          
+          // Update message issues_matched if this is the first message
+          if (thread.first_message_id && history.messages[thread.first_message_id]) {
+            history.messages[thread.first_message_id].issues_matched = thread.issues.map(i => ({
+              issue_number: i.number,
+              similarity_score: i.similarity_score,
+            }));
+          }
+        }
+        
+        return history;
+      }
+    } catch (error) {
+      // Database load failed, fall back to JSON
+      console.error("[ClassificationHistory] Database load failed, falling back to JSON:", error);
+    }
+  }
+
+  // Fall back to JSON file
   const historyPath = getHistoryPath(resultsDir);
 
   if (!existsSync(historyPath)) {

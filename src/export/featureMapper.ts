@@ -291,8 +291,8 @@ export async function mapGroupsToFeatures(
  */
 export async function mapToFeatures(
   features: Feature[],
-  classifiedData: any
-): Promise<any[]> {
+  classifiedData: unknown
+): Promise<unknown[]> {
   // TODO: Implement this function if needed
   // For now, return empty array to avoid breaking the build
   log("mapToFeatures is deprecated and not fully implemented");

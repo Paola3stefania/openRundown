@@ -91,7 +91,7 @@ discord.once("ready", async () => {
             type: channelInfo.type,
           });
           console.log(`#${channelInfo.name} - Accessible`);
-        } catch (error: any) {
+        } catch (error: unknown) {
           const reason = error.code === 50001 ? "Missing Access" : 
                         error.code === 50013 ? "Missing Permissions" :
                         error.code === 50001 ? "Missing Access" :
@@ -107,7 +107,7 @@ discord.once("ready", async () => {
         inaccessibleChannels.push({
           name: channelInfo.name,
           id: channelInfo.id,
-          reason: error.message || "Failed to fetch channel",
+          reason: error instanceof Error ? error.message : "Failed to fetch channel",
         });
         console.log(`Error: #${channelInfo.name} - Failed to fetch`);
       }

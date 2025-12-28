@@ -54,13 +54,25 @@ export class LinearIntegration extends BasePMTool {
       },
     };
 
-    const response = await this.graphqlRequest(query, variables);
+    const response = await this.graphqlRequest<{
+      issueCreate?: {
+        success: boolean;
+        issue?: {
+          id: string;
+          identifier: string;
+          url: string;
+        };
+      };
+    }>(query, variables);
     
     if (!response.data?.issueCreate?.success) {
       throw new Error(`Failed to create Linear issue: ${JSON.stringify(response.errors)}`);
     }
 
-    const createdIssue = response.data.issueCreate.issue;
+    const createdIssue = response.data?.issueCreate?.issue;
+    if (!createdIssue) {
+      throw new Error("Failed to create Linear issue: no issue data returned");
+    }
     
     return {
       id: createdIssue.id,
@@ -78,7 +90,7 @@ export class LinearIntegration extends BasePMTool {
       }
     `;
 
-    const input: any = {};
+    const input: Record<string, unknown> = {};
     
     if (updates.title) input.title = updates.title;
     if (updates.description) input.description = this.formatDescription(updates as PMToolIssue);
@@ -91,7 +103,11 @@ export class LinearIntegration extends BasePMTool {
       input,
     };
 
-    const response = await this.graphqlRequest(query, variables);
+    const response = await this.graphqlRequest<{
+      issueUpdate?: {
+        success: boolean;
+      };
+    }>(query, variables);
     
     if (!response.data?.issueUpdate?.success) {
       throw new Error(`Failed to update Linear issue: ${JSON.stringify(response.errors)}`);
@@ -182,7 +198,16 @@ export class LinearIntegration extends BasePMTool {
     };
 
     try {
-      const response = await this.graphqlRequest(query, variables);
+      const response = await this.graphqlRequest<{
+        projectCreate?: {
+          success: boolean;
+          error?: { message?: string };
+          project?: {
+            id: string;
+            name: string;
+          };
+        };
+      }>(query, variables);
       
       if (!response.data?.projectCreate?.success) {
         const errorMsg = response.data?.projectCreate?.error?.message 
@@ -241,7 +266,14 @@ export class LinearIntegration extends BasePMTool {
         }
       `;
       
-      const response = await this.graphqlRequest(query, {});
+      const response = await this.graphqlRequest<{
+        projects?: {
+          nodes?: Array<{
+            id: string;
+            name: string;
+          }>;
+        };
+      }>(query, {});
       
       if (response.data?.projects?.nodes) {
         // Update name cache with all projects
@@ -285,7 +317,14 @@ export class LinearIntegration extends BasePMTool {
         }
       `;
       
-      const response = await this.graphqlRequest(query, {});
+      const response = await this.graphqlRequest<{
+        projects?: {
+          nodes?: Array<{
+            id: string;
+            name: string;
+          }>;
+        };
+      }>(query, {});
       
       if (response.data?.projects?.nodes) {
         const normalizedSearchName = projectName.toLowerCase().trim();
@@ -359,12 +398,20 @@ export class LinearIntegration extends BasePMTool {
     try {
       // Search for exact title match (Linear search supports quoted strings for exact match)
       const searchQuery = `"${title}"`;
-      const response = await this.graphqlRequest(query, { query: searchQuery });
+      const response = await this.graphqlRequest<{
+        issueSearch?: {
+          nodes?: Array<{
+            id: string;
+            title: string;
+            url: string;
+          }>;
+        };
+      }>(query, { query: searchQuery });
       
       if (response.data?.issueSearch?.nodes) {
         // Find exact title match (case-insensitive)
         const exactMatch = response.data.issueSearch.nodes.find(
-          (issue: { title: string }) => issue.title.toLowerCase() === title.toLowerCase()
+          (issue) => issue.title.toLowerCase() === title.toLowerCase()
         );
         
         if (exactMatch) {
@@ -400,10 +447,18 @@ export class LinearIntegration extends BasePMTool {
     `;
 
     try {
-      const response = await this.graphqlRequest(query, {});
+      const response = await this.graphqlRequest<{
+        teams?: {
+          nodes?: Array<{
+            id: string;
+            name: string;
+            key: string;
+          }>;
+        };
+      }>(query, {});
       
       if (response.data?.teams?.nodes) {
-        return response.data.teams.nodes.map((team: { id: string; name: string; key: string }) => ({
+        return response.data.teams.nodes.map((team) => ({
           id: team.id,
           name: team.name,
           key: team.key,
@@ -433,7 +488,13 @@ export class LinearIntegration extends BasePMTool {
     `;
 
     try {
-      const response = await this.graphqlRequest(query, { id: teamIdOrKey });
+      const response = await this.graphqlRequest<{
+        team?: {
+          id: string;
+          name: string;
+          key: string;
+        };
+      }>(query, { id: teamIdOrKey });
       
       if (response.data?.team) {
         return {
@@ -494,13 +555,25 @@ export class LinearIntegration extends BasePMTool {
     };
 
     try {
-      const response = await this.graphqlRequest(query, variables);
+      const response = await this.graphqlRequest<{
+        teamCreate?: {
+          success: boolean;
+          team?: {
+            id: string;
+            name: string;
+            key: string;
+          };
+        };
+      }>(query, variables);
       
       if (!response.data?.teamCreate?.success) {
         throw new Error(`Failed to create Linear team: ${JSON.stringify(response.errors)}`);
       }
 
-      const team = response.data.teamCreate.team;
+      const team = response.data?.teamCreate?.team;
+      if (!team) {
+        throw new Error("Failed to create Linear team: no team data returned");
+      }
       log(`Created Linear team: ${team.name} (${team.key}) - ${team.id}`);
       
       return team.id;
@@ -568,7 +641,16 @@ export class LinearIntegration extends BasePMTool {
     `;
 
     try {
-      const response = await this.graphqlRequest(query, { id: issueId });
+      const response = await this.graphqlRequest<{
+        issue?: {
+          id: string;
+          identifier: string;
+          url: string;
+          title: string;
+          state?: { name: string };
+          project?: { id: string; name: string } | null;
+        };
+      }>(query, { id: issueId });
       
       if (response.data?.issue) {
         return {
@@ -577,8 +659,8 @@ export class LinearIntegration extends BasePMTool {
           url: response.data.issue.url,
           title: response.data.issue.title,
           state: response.data.issue.state?.name || "Unknown",
-          projectId: response.data.issue.project?.id,
-          projectName: response.data.issue.project?.name,
+          projectId: response.data.issue.project?.id ?? undefined,
+          projectName: response.data.issue.project?.name ?? undefined,
         };
       }
       
@@ -640,12 +722,25 @@ export class LinearIntegration extends BasePMTool {
     `;
 
     try {
-      const allIssues: any[] = [];
+      interface LinearIssueResult {
+        id: string;
+        identifier: string;
+        url: string;
+        title: string;
+        description?: string;
+        state: string;
+        projectId?: string;
+        projectName?: string;
+        priority?: number;
+        labels?: Array<{ id: string; name: string }>;
+      }
+      
+      const allIssues: LinearIssueResult[] = [];
       let hasNextPage = true;
       let cursor: string | undefined;
 
       while (hasNextPage && allIssues.length < limit) {
-        const variables: any = {
+        const variables: { teamId: string; first: number; after?: string } = {
           teamId,
           first: Math.min(limit - allIssues.length, 100), // Linear API limit is typically 100 per page
         };
@@ -656,19 +751,39 @@ export class LinearIntegration extends BasePMTool {
           break; // Simplified - can be enhanced with proper pagination
         }
 
-        const response = await this.graphqlRequest(query, variables);
+        const response = await this.graphqlRequest<{
+          team?: {
+            issues?: {
+              nodes?: Array<{
+                id: string;
+                identifier: string;
+                url: string;
+                title: string;
+                description: string | null;
+                state?: { name: string };
+                project?: { id: string; name: string } | null;
+                priority: number | null;
+                labels?: { nodes: Array<{ id: string; name: string }> };
+              }>;
+              pageInfo?: {
+                hasNextPage: boolean;
+                endCursor?: string;
+              };
+            };
+          };
+        }>(query, variables);
         
         if (response.data?.team?.issues?.nodes) {
-          const issues = response.data.team.issues.nodes.map((issue: any) => ({
+          const issues = response.data.team.issues.nodes.map((issue) => ({
             id: issue.id,
             identifier: issue.identifier,
             url: issue.url,
             title: issue.title,
-            description: issue.description,
+            description: issue.description ?? undefined,
             state: issue.state?.name || "Unknown",
-            projectId: issue.project?.id,
-            projectName: issue.project?.name,
-            priority: issue.priority,
+            projectId: issue.project?.id ?? undefined,
+            projectName: issue.project?.name ?? undefined,
+            priority: issue.priority ?? undefined,
             labels: issue.labels?.nodes || [],
           }));
           
@@ -688,7 +803,7 @@ export class LinearIntegration extends BasePMTool {
     }
   }
 
-  private async graphqlRequest(query: string, variables: any): Promise<any> {
+  private async graphqlRequest<T = Record<string, unknown>>(query: string, variables: Record<string, unknown>): Promise<{ data?: T; errors?: Array<{ message: string }> }> {
     const response = await fetch(this.apiUrl, {
       method: "POST",
       headers: {

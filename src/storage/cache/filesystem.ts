@@ -7,6 +7,7 @@ import { join, dirname } from "path";
 import type { ICacheStorage } from "./interface.js";
 import type { DiscordCache } from "./discordCache.js";
 import type { ClassificationHistory } from "./classificationHistory.js";
+import type { IssuesCache } from "../../connectors/github/client.js";
 
 export class FilesystemCacheStorage implements ICacheStorage {
   async loadDiscordCache(cachePath: string): Promise<DiscordCache> {
@@ -46,13 +47,13 @@ export class FilesystemCacheStorage implements ICacheStorage {
     return existsSync(historyPath);
   }
 
-  async loadGitHubIssuesCache(cachePath: string): Promise<any> {
+  async loadGitHubIssuesCache(cachePath: string): Promise<IssuesCache | null> {
     const filePath = cachePath.startsWith("/") ? cachePath : join(process.cwd(), cachePath);
     const content = await readFile(filePath, "utf-8");
     return JSON.parse(content);
   }
 
-  async saveGitHubIssuesCache(cachePath: string, cache: any): Promise<void> {
+  async saveGitHubIssuesCache(cachePath: string, cache: IssuesCache): Promise<void> {
     const filePath = cachePath.startsWith("/") ? cachePath : join(process.cwd(), cachePath);
     
     // Ensure directory exists

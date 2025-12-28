@@ -21,6 +21,12 @@ export interface GitHubIssue {
     color: string;
   }>;
   html_url: string;
+  pull_request?: {
+    url: string;
+    html_url: string;
+    diff_url: string;
+    patch_url: string;
+  } | null;
 }
 
 export interface GitHubSearchResult {
@@ -116,7 +122,7 @@ export async function fetchAllGitHubIssues(
       );
     }
 
-    const issues: any[] = await response.json();
+    const issues: GitHubIssue[] = await response.json();
     
     // Filter out pull requests (issues have pull_request field set to null)
     const actualIssues = issues.filter(issue => !issue.pull_request);
@@ -170,7 +176,7 @@ export async function fetchAllGitHubIssues(
         );
       }
 
-      const issues: any[] = await response.json();
+      const issues: GitHubIssue[] = await response.json();
       
       // Filter out pull requests (issues have pull_request field set to null)
       const actualIssues = issues.filter(issue => !issue.pull_request);

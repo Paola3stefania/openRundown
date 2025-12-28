@@ -6,6 +6,8 @@
 import type { IStorage } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
 import type { DocumentationContent } from "../../export/documentationFetcher.js";
+import type { ProductFeature } from "../../export/types.js";
+import type { GitHubIssue, IssuesCache } from "../../connectors/github/client.js";
 import { readFile, writeFile, mkdir, readdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -50,7 +52,7 @@ export class JsonStorage implements IStorage {
         .filter(f => f.startsWith(`discord-classified-`) && f.includes(channelId) && f.endsWith('.json'));
 
       let outputPath: string;
-      let existingThreads: any[] = [];
+      let existingThreads: ClassifiedThread[] = [];
 
       // Find file with most threads
       let bestFile: string | null = null;
@@ -87,13 +89,36 @@ export class JsonStorage implements IStorage {
       }
 
       // Merge threads
-      const threadMap = new Map<string, any>();
+      interface LegacyThreadFormat {
+        thread?: {
+          thread_id: string;
+          thread_name?: string;
+          message_count?: number;
+          first_message_id?: string;
+          first_message_author?: string;
+          first_message_timestamp?: string;
+          first_message_url?: string;
+          classified_at?: string;
+          classified_status?: string;
+        };
+        thread_id?: string;
+        issues?: Array<{
+          number: number;
+          title: string;
+          state: string;
+          url: string;
+          similarity_score: number;
+        }>;
+      }
+      
+      const threadMap = new Map<string, ClassifiedThread | LegacyThreadFormat>();
       for (const thread of existingThreads) {
-        const threadId = thread.thread?.thread_id || thread.thread_id;
-        if (threadId) threadMap.set(threadId, thread);
+        const threadData = thread as ClassifiedThread | LegacyThreadFormat;
+        const threadId = ('thread' in threadData && threadData.thread ? threadData.thread.thread_id : undefined) || threadData.thread_id;
+        if (threadId) threadMap.set(threadId, threadData);
       }
       for (const thread of channelThreads) {
-        threadMap.set(thread.thread_id, {
+        const legacyThread: LegacyThreadFormat = {
           thread: {
             thread_id: thread.thread_id,
             thread_name: thread.thread_name,
@@ -105,7 +130,8 @@ export class JsonStorage implements IStorage {
             classified_status: thread.status,
           },
           issues: thread.issues,
-        });
+        };
+        threadMap.set(thread.thread_id, legacyThread);
       }
 
       const mergedThreads = Array.from(threadMap.values());
@@ -158,22 +184,74 @@ export class JsonStorage implements IStorage {
     const parsed = JSON.parse(content);
     const threads = parsed.classified_threads || [];
 
-    return threads.map((t: any) => ({
-      thread_id: t.thread?.thread_id || t.thread_id,
-      channel_id: channelId,
-      thread_name: t.thread?.thread_name,
-      message_count: t.thread?.message_count || 1,
-      first_message_id: t.thread?.first_message_id || t.thread_id,
-      first_message_author: t.thread?.first_message_author,
-      first_message_timestamp: t.thread?.first_message_timestamp,
-      first_message_url: t.thread?.first_message_url,
-      classified_at: t.thread?.classified_at || new Date().toISOString(),
-      status: t.thread?.classified_status || "completed",
-      issues: t.issues || [],
-    }));
+    interface LegacyThreadFormat {
+      thread?: {
+        thread_id: string;
+        thread_name?: string;
+        message_count?: number;
+        first_message_id?: string;
+        first_message_author?: string;
+        first_message_timestamp?: string;
+        first_message_url?: string;
+        classified_at?: string;
+        classified_status?: string;
+      };
+      thread_id?: string;
+      issues?: Array<{
+        number: number;
+        title: string;
+        state: string;
+        url: string;
+        similarity_score: number;
+      }>;
+    }
+    
+    return threads.map((t: ClassifiedThread | LegacyThreadFormat): ClassifiedThread => {
+      const isLegacy = 'thread' in t && t.thread;
+      if (isLegacy) {
+        const legacy = t as LegacyThreadFormat;
+        return {
+          thread_id: legacy.thread!.thread_id,
+          channel_id: channelId,
+          thread_name: legacy.thread!.thread_name,
+          message_count: legacy.thread!.message_count || 1,
+          first_message_id: legacy.thread!.first_message_id || legacy.thread!.thread_id,
+          first_message_author: legacy.thread!.first_message_author,
+          first_message_timestamp: legacy.thread!.first_message_timestamp,
+          first_message_url: legacy.thread!.first_message_url,
+          classified_at: legacy.thread!.classified_at || new Date().toISOString(),
+          status: (legacy.thread!.classified_status as "pending" | "classifying" | "completed" | "failed") || "completed",
+          issues: legacy.issues || [],
+        };
+      } else {
+        return t as ClassifiedThread;
+      }
+    });
   }
 
   async getClassifiedThread(threadId: string): Promise<ClassifiedThread | null> {
+    interface LegacyThreadFormat {
+      thread?: {
+        thread_id: string;
+        thread_name?: string;
+        message_count?: number;
+        first_message_id?: string;
+        first_message_author?: string;
+        first_message_timestamp?: string;
+        first_message_url?: string;
+        classified_at?: string;
+        classified_status?: string;
+      };
+      thread_id?: string;
+      issues?: Array<{
+        number: number;
+        title: string;
+        state: string;
+        url: string;
+        similarity_score: number;
+      }>;
+    }
+    
     // Search all classification files
     const existingFiles = await readdir(this.resultsDir).catch(() => []);
     const classificationFiles = existingFiles.filter(f => f.startsWith(`discord-classified-`) && f.endsWith('.json'));
@@ -186,21 +264,35 @@ export class JsonStorage implements IStorage {
         const threads = parsed.classified_threads || [];
 
         for (const t of threads) {
-          const tId = t.thread?.thread_id || t.thread_id;
+          const threadData = t as ClassifiedThread | LegacyThreadFormat;
+          const isLegacy = 'thread' in threadData && threadData.thread;
+          let tId: string;
+          if (isLegacy) {
+            const legacy = threadData as LegacyThreadFormat;
+            tId = legacy.thread!.thread_id;
+          } else {
+            tId = (threadData as ClassifiedThread).thread_id;
+          }
+          
           if (tId === threadId) {
-            return {
-              thread_id: tId,
-              channel_id: parsed.channel_id,
-              thread_name: t.thread?.thread_name,
-              message_count: t.thread?.message_count || 1,
-              first_message_id: t.thread?.first_message_id || tId,
-              first_message_author: t.thread?.first_message_author,
-              first_message_timestamp: t.thread?.first_message_timestamp,
-              first_message_url: t.thread?.first_message_url,
-              classified_at: t.thread?.classified_at || new Date().toISOString(),
-              status: t.thread?.classified_status || "completed",
-              issues: t.issues || [],
-            };
+            if (isLegacy) {
+              const legacy = threadData as LegacyThreadFormat;
+              return {
+                thread_id: tId,
+                channel_id: parsed.channel_id,
+                thread_name: legacy.thread!.thread_name,
+                message_count: legacy.thread!.message_count || 1,
+                first_message_id: legacy.thread!.first_message_id || tId,
+                first_message_author: legacy.thread!.first_message_author,
+                first_message_timestamp: legacy.thread!.first_message_timestamp,
+                first_message_url: legacy.thread!.first_message_url,
+                classified_at: legacy.thread!.classified_at || new Date().toISOString(),
+                status: (legacy.thread!.classified_status as "pending" | "classifying" | "completed" | "failed") || "completed",
+                issues: legacy.issues || [],
+              };
+            } else {
+              return threadData as ClassifiedThread;
+            }
           }
         }
       } catch {
@@ -254,29 +346,12 @@ export class JsonStorage implements IStorage {
       }
 
       // Merge groups
-      const groupMap = new Map<string, any>();
+      const groupMap = new Map<string, Group>();
       for (const group of existingGroups) {
         groupMap.set(group.id, group);
       }
       for (const group of channelGroups) {
-        groupMap.set(group.id, {
-          id: group.id,
-          github_issue: group.github_issue_number ? {
-            number: group.github_issue_number,
-          } : undefined,
-          suggested_title: group.suggested_title,
-          avg_similarity: group.avg_similarity,
-          thread_count: group.thread_count,
-          is_cross_cutting: group.is_cross_cutting,
-          status: group.status,
-          created_at: group.created_at,
-          updated_at: group.updated_at,
-          exported_at: group.exported_at,
-          linear_issue_id: group.linear_issue_id,
-          linear_issue_url: group.linear_issue_url,
-          linear_project_ids: group.linear_project_ids,
-          threads: group.threads,
-        });
+        groupMap.set(group.id, group);
       }
 
       const mergedGroups = Array.from(groupMap.values());
@@ -293,46 +368,33 @@ export class JsonStorage implements IStorage {
     }
   }
 
-  async getGroups(channelId: string, options?: { status?: "pending" | "exported" }): Promise<Group[]> {
-    const existingFiles = await readdir(this.resultsDir).catch(() => []);
-    const existingFile = existingFiles
-      .filter(f => f.startsWith(`grouping-`) && f.includes(channelId) && f.endsWith('.json'))
-      .sort()
-      .reverse()[0];
-
-    if (!existingFile) {
-      return [];
-    }
-
-    const filePath = join(this.resultsDir, existingFile);
-    const content = await readFile(filePath, "utf-8");
-    const parsed = JSON.parse(content);
-    let groups = parsed.groups || [];
-
-    if (options?.status) {
-      groups = groups.filter((g: any) => g.status === options.status);
-    }
-
-    return groups.map((g: any) => ({
-      id: g.id,
-      channel_id: channelId,
-      github_issue_number: g.github_issue?.number,
-      suggested_title: g.suggested_title || g.github_issue?.title,
-      avg_similarity: g.avg_similarity,
-      thread_count: g.thread_count || g.threads?.length || 0,
-      is_cross_cutting: g.is_cross_cutting || false,
-      status: g.status || "pending",
-      created_at: g.created_at || parsed.timestamp,
-      updated_at: g.updated_at || parsed.timestamp,
-      exported_at: g.exported_at,
-      linear_issue_id: g.linear_issue_id,
-      linear_issue_url: g.linear_issue_url,
-      linear_project_ids: g.linear_project_ids,
-      threads: g.threads || [],
-    }));
-  }
-
   async getGroup(groupId: string): Promise<Group | null> {
+    interface LegacyGroupFormat {
+      id?: string;
+      github_issue?: {
+        number?: number;
+        title?: string;
+      };
+      suggested_title?: string;
+      avg_similarity?: number;
+      thread_count?: number;
+      threads?: Array<{
+        thread_id: string;
+        thread_name?: string;
+        similarity_score: number;
+      }>;
+      is_cross_cutting?: boolean;
+      status?: string;
+      created_at?: string;
+      updated_at?: string;
+      exported_at?: string;
+      linear_issue_id?: string;
+      linear_issue_url?: string;
+      linear_issue_identifier?: string;
+      linear_project_ids?: string[];
+      affects_features?: Array<{ id: string; name: string }>;
+    }
+    
     // Search all grouping files
     const existingFiles = await readdir(this.resultsDir).catch(() => []);
     const groupingFiles = existingFiles.filter(f => f.startsWith(`grouping-`) && f.endsWith('.json'));
@@ -345,32 +407,194 @@ export class JsonStorage implements IStorage {
         const groups = parsed.groups || [];
 
         for (const g of groups) {
-          if (g.id === groupId) {
-            return {
-              id: g.id,
-              channel_id: parsed.channel_id,
-              github_issue_number: g.github_issue?.number,
-              suggested_title: g.suggested_title || g.github_issue?.title,
-              avg_similarity: g.avg_similarity,
-              thread_count: g.thread_count || g.threads?.length || 0,
-              is_cross_cutting: g.is_cross_cutting || false,
-              status: g.status || "pending",
-              created_at: g.created_at || parsed.timestamp,
-              updated_at: g.updated_at || parsed.timestamp,
-              exported_at: g.exported_at,
-              linear_issue_id: g.linear_issue_id,
-              linear_issue_url: g.linear_issue_url,
-              linear_project_ids: g.linear_project_ids,
-              threads: g.threads || [],
-            };
+          const groupData = g as Group | LegacyGroupFormat;
+          if (groupData.id === groupId) {
+            const isLegacy = 'github_issue' in groupData && groupData.github_issue && !('github_issue_number' in groupData);
+            if (isLegacy) {
+              const legacy = groupData as LegacyGroupFormat;
+              return {
+                id: legacy.id || "",
+                channel_id: parsed.channel_id,
+                github_issue_number: legacy.github_issue?.number,
+                suggested_title: legacy.suggested_title || legacy.github_issue?.title || "Untitled Group",
+                avg_similarity: legacy.avg_similarity || 0,
+                thread_count: legacy.thread_count || legacy.threads?.length || 0,
+                is_cross_cutting: legacy.is_cross_cutting || false,
+                status: (legacy.status as "pending" | "exported") || "pending",
+                created_at: legacy.created_at || parsed.timestamp || new Date().toISOString(),
+                updated_at: legacy.updated_at || parsed.timestamp || new Date().toISOString(),
+                exported_at: legacy.exported_at,
+                linear_issue_id: legacy.linear_issue_id,
+                linear_issue_url: legacy.linear_issue_url,
+                linear_issue_identifier: legacy.linear_issue_identifier,
+                linear_project_ids: legacy.linear_project_ids,
+                affects_features: legacy.affects_features,
+                threads: legacy.threads?.map(t => ({
+                  thread_id: t.thread_id,
+                  thread_name: t.thread_name,
+                  similarity_score: t.similarity_score,
+                })) || [],
+              };
+            } else {
+              return groupData as Group;
+            }
           }
         }
       } catch {
         continue;
       }
     }
-
+    
     return null;
+  }
+  
+  async updateGroupStatus(groupId: string, status: "pending" | "exported"): Promise<void> {
+    const existingFiles = await readdir(this.resultsDir).catch(() => []);
+    const groupingFiles = existingFiles.filter(f => f.startsWith(`grouping-`) && f.endsWith('.json'));
+
+    for (const file of groupingFiles) {
+      try {
+        const filePath = join(this.resultsDir, file);
+        const content = await readFile(filePath, "utf-8");
+        const parsed = JSON.parse(content);
+        const groups = parsed.groups || [];
+
+        let found = false;
+        for (const g of groups) {
+          if (g.id === groupId) {
+            g.status = status;
+            g.updated_at = new Date().toISOString();
+            if (status === "exported") {
+              g.exported_at = new Date().toISOString();
+            }
+            found = true;
+            break;
+          }
+        }
+
+        if (found) {
+          await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf-8");
+          return;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    throw new Error(`Group ${groupId} not found`);
+  }
+
+  async addGroup(group: Group): Promise<void> {
+    const outputPath = join(this.resultsDir, `grouping-${group.channel_id}-${Date.now()}.json`);
+    await writeFile(outputPath, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      channel_id: group.channel_id,
+      grouping_method: "manual",
+      stats: {
+        totalThreads: 0,
+        groupedThreads: 0,
+        ungroupedThreads: 0,
+        uniqueIssues: 0,
+        multiThreadGroups: 0,
+        singleThreadGroups: 0,
+      },
+      groups: [group],
+    }, null, 2), "utf-8");
+  }
+
+  async getGroups(channelId: string, options?: { status?: "pending" | "exported" }): Promise<Group[]> {
+    const existingFiles = await readdir(this.resultsDir).catch(() => []);
+    const matchingFiles = existingFiles.filter(f => f.startsWith(`grouping-`) && f.includes(channelId) && f.endsWith('.json'));
+    
+    let bestFile: string | null = null;
+    let maxGroups = 0;
+
+    for (const file of matchingFiles) {
+      try {
+        const filePath = join(this.resultsDir, file);
+        const content = await readFile(filePath, "utf-8");
+        const parsed = JSON.parse(content);
+        const groupCount = parsed.groups?.length || 0;
+
+        if (groupCount > maxGroups) {
+          maxGroups = groupCount;
+          bestFile = file;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!bestFile) {
+      return [];
+    }
+
+    const filePath = join(this.resultsDir, bestFile);
+    const content = await readFile(filePath, "utf-8");
+    const parsed = JSON.parse(content);
+    let groups = parsed.groups || [];
+
+    if (options?.status) {
+      groups = groups.filter((g: Group | LegacyGroupFormat) => ('status' in g ? (g as Group).status === options.status : false));
+    }
+
+    interface LegacyGroupFormat {
+      id?: string;
+      github_issue?: {
+        number?: number;
+        title?: string;
+      };
+      suggested_title?: string;
+      avg_similarity?: number;
+      thread_count?: number;
+      threads?: Array<{
+        thread_id: string;
+        thread_name?: string;
+        similarity_score: number;
+      }>;
+      is_cross_cutting?: boolean;
+      status?: string;
+      created_at?: string;
+      updated_at?: string;
+      exported_at?: string;
+      linear_issue_id?: string;
+      linear_issue_url?: string;
+      linear_issue_identifier?: string;
+      linear_project_ids?: string[];
+      affects_features?: Array<{ id: string; name: string }>;
+    }
+    
+    return groups.map((g: Group | LegacyGroupFormat): Group => {
+      const isLegacy = 'github_issue' in g && g.github_issue && !('github_issue_number' in g);
+      if (isLegacy) {
+        const legacy = g as LegacyGroupFormat;
+        return {
+          id: legacy.id || "",
+          channel_id: channelId,
+          github_issue_number: legacy.github_issue?.number,
+          suggested_title: legacy.suggested_title || legacy.github_issue?.title || "Untitled Group",
+          avg_similarity: legacy.avg_similarity || 0,
+          thread_count: legacy.thread_count || legacy.threads?.length || 0,
+          is_cross_cutting: legacy.is_cross_cutting || false,
+          status: (legacy.status as "pending" | "exported") || "pending",
+          created_at: legacy.created_at || parsed.timestamp || new Date().toISOString(),
+          updated_at: legacy.updated_at || parsed.timestamp || new Date().toISOString(),
+          exported_at: legacy.exported_at,
+          linear_issue_id: legacy.linear_issue_id,
+          linear_issue_url: legacy.linear_issue_url,
+          linear_issue_identifier: legacy.linear_issue_identifier,
+          linear_project_ids: legacy.linear_project_ids,
+          affects_features: legacy.affects_features,
+          threads: legacy.threads?.map(t => ({
+            thread_id: t.thread_id,
+            thread_name: t.thread_name,
+            similarity_score: t.similarity_score,
+          })) || [],
+        };
+      } else {
+        return g as Group;
+      }
+    });
   }
 
   async markGroupAsExported(groupId: string, linearIssueId: string, linearIssueUrl: string, projectIds?: string[]): Promise<void> {
@@ -416,7 +640,7 @@ export class JsonStorage implements IStorage {
         .reverse()[0];
 
       let outputPath: string;
-      let existingUngrouped: any[] = [];
+      let existingUngrouped: UngroupedThread[] = [];
 
       if (existingFile) {
         outputPath = join(this.resultsDir, existingFile);
@@ -432,7 +656,7 @@ export class JsonStorage implements IStorage {
       }
 
       // Merge ungrouped threads
-      const threadMap = new Map<string, any>();
+      const threadMap = new Map<string, UngroupedThread>();
       for (const thread of existingUngrouped) {
         threadMap.set(thread.thread_id, thread);
       }
@@ -443,7 +667,7 @@ export class JsonStorage implements IStorage {
       const mergedUngrouped = Array.from(threadMap.values());
 
       // Load existing groups if file exists
-      let existingGroups: any[] = [];
+      let existingGroups: Group[] = [];
       if (existingFile) {
         try {
           const content = await readFile(outputPath, "utf-8");
@@ -483,7 +707,7 @@ export class JsonStorage implements IStorage {
     const parsed = JSON.parse(content);
     const ungrouped = parsed.ungrouped_threads || [];
 
-    return ungrouped.map((t: any) => ({
+    return ungrouped.map((t: UngroupedThread | { thread_id?: string; thread_name?: string; url?: string; author?: string; timestamp?: string; reason?: string; top_issue?: unknown; export_status?: string; exported_at?: string; linear_issue_id?: string; linear_issue_url?: string; linear_issue_identifier?: string }) => ({
       thread_id: t.thread_id,
       channel_id: channelId,
       thread_name: t.thread_name,
@@ -625,7 +849,7 @@ export class JsonStorage implements IStorage {
     }
   }
 
-  async saveFeatures(urls: string[], features: any[], docCount: number): Promise<void> {
+  async saveFeatures(urls: string[], features: ProductFeature[], docCount: number): Promise<void> {
     const cacheFile = join(this.resultsDir, "features-cache.json");
     await mkdir(this.resultsDir, { recursive: true });
     
@@ -642,7 +866,7 @@ export class JsonStorage implements IStorage {
     await writeFile(cacheFile, JSON.stringify(cached, null, 2), "utf-8");
   }
 
-  async getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null> {
+  async getFeatures(urls: string[]): Promise<{ features: ProductFeature[]; extracted_at: string; documentation_count: number } | null> {
     const cacheFile = join(this.resultsDir, "features-cache.json");
     
     if (!existsSync(cacheFile)) {
@@ -651,7 +875,7 @@ export class JsonStorage implements IStorage {
 
     try {
       const content = await readFile(cacheFile, "utf-8");
-      const cached: { urls: string[]; features: any[]; extracted_at: string; documentation_count: number } = JSON.parse(content);
+      const cached: { urls: string[]; features: ProductFeature[]; extracted_at: string; documentation_count: number } = JSON.parse(content);
       
       // Check if URLs match (order doesn't matter)
       const cachedUrls = new Set(cached.urls.map(u => u.toLowerCase().trim()));
@@ -768,7 +992,7 @@ export class JsonStorage implements IStorage {
 
     try {
       const content = await readFile(cachePath, "utf-8");
-      const cache: { issues: any[] } = JSON.parse(content);
+      const cache: IssuesCache = JSON.parse(content);
       
       let issues = cache.issues || [];
       
@@ -783,11 +1007,11 @@ export class JsonStorage implements IStorage {
       return issues.map(issue => ({
         number: issue.number,
         title: issue.title,
-        url: issue.html_url || issue.url,
+        url: issue.html_url,
         state: issue.state,
         body: issue.body,
-        labels: issue.labels?.map((l: any) => typeof l === 'string' ? l : l.name) || [],
-        author: issue.user?.login || issue.author,
+        labels: issue.labels?.map((l: string | { name: string }) => typeof l === 'string' ? l : l.name) || [],
+        author: issue.user?.login,
         created_at: issue.created_at,
         updated_at: issue.updated_at,
         in_group: false, // Not stored in JSON cache

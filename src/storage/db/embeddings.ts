@@ -9,6 +9,7 @@ import type { DocumentationContent } from "../../export/documentationFetcher.js"
 import type { ProductFeature } from "../../export/types.js";
 import { createEmbedding, createEmbeddings } from "../../core/classify/semantic.js";
 import { getConfig } from "../../config/index.js";
+import type { Prisma } from "@prisma/client";
 
 export type Embedding = number[];
 
@@ -41,7 +42,7 @@ export async function saveDocumentationSectionEmbedding(
     where: { sectionId },
     update: {
       documentationUrl,
-      embedding: embedding as any, // Prisma JSON type
+      embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
@@ -228,7 +229,7 @@ export async function computeAndSaveDocumentationSectionEmbeddings(
 
       // Batch save all embeddings in a single transaction
       const model = getEmbeddingModel();
-      await prisma.$transaction(async (tx: any) => {
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
         await Promise.all(
           embeddings.map((embedding, j) => {
             const section = batch[j];
@@ -374,7 +375,7 @@ export async function computeAndSaveDocumentationEmbeddings(
 
       // Batch save all embeddings in a single transaction
       const model = getEmbeddingModel();
-      await prisma.$transaction(async (tx: any) => {
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
         await Promise.all(
           embeddings.map((embedding, j) => {
             const doc = batch[j];
@@ -525,7 +526,7 @@ export async function computeAndSaveFeatureEmbeddings(
 
       // Batch save all embeddings in a single transaction
       const model = getEmbeddingModel();
-      await prisma.$transaction(async (tx: any) => {
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
         await Promise.all(
           embeddings.map((embedding, j) => {
             const feature = batch[j];

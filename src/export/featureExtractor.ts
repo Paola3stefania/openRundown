@@ -99,7 +99,7 @@ Focus on user-facing features and capabilities, not implementation details.`
     const features = Array.isArray(parsed) ? parsed : (parsed.features || parsed.feature || []);
     
     // Add IDs and normalize
-    const normalizedFeatures: ProductFeature[] = features.map((feature: any, index: number) => ({
+    const normalizedFeatures: ProductFeature[] = features.map((feature: Partial<ProductFeature> & { name: string; description: string }, index: number) => ({
       id: feature.id || `feature-${index + 1}`,
       name: feature.name,
       description: feature.description,
@@ -123,8 +123,8 @@ Focus on user-facing features and capabilities, not implementation details.`
  */
 export async function enhanceFeatures(
   features: ProductFeature[],
-  githubIssues?: any[],
-  discordMessages?: any[]
+  githubIssues?: unknown[],
+  discordMessages?: unknown[]
 ): Promise<ProductFeature[]> {
   // Future: Could use LLM to enhance features based on actual usage patterns
   // from GitHub issues and Discord messages

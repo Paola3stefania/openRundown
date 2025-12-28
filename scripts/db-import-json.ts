@@ -23,7 +23,7 @@ interface GitHubIssue {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface IssuesCache {
@@ -67,8 +67,8 @@ async function importData() {
       throw new Error("Could not connect to database");
     }
     console.log("Database connection successful!\n");
-  } catch (error: any) {
-    console.error("ERROR: Failed to connect to database:", error.message);
+  } catch (error: unknown) {
+    console.error("ERROR: Failed to connect to database:", error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 
@@ -129,8 +129,8 @@ async function importData() {
     `);
 
     console.log("   ✓ Tables created/verified\n");
-  } catch (error: any) {
-    console.error(`ERROR: Failed to create tables: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`ERROR: Failed to create tables: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 
@@ -178,12 +178,12 @@ async function importData() {
             ]
           );
           imported++;
-        } catch (error: any) {
-          if (error.code === "23505") {
+        } catch (error: unknown) {
+          if (error && typeof error === "object" && "code" in error && error.code === "23505") {
             // Unique constraint violation - already exists
             skipped++;
           } else {
-            console.error(`   Warning: Failed to import issue #${issue.number}: ${error.message}`);
+            console.error(`   Warning: Failed to import issue #${issue.number}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
       }
@@ -191,11 +191,11 @@ async function importData() {
 
     console.log(`   ✓ Imported ${imported} issues, skipped ${skipped} (already exist)`);
     console.log(`   Total in cache: ${issuesCache.issues.length}\n`);
-  } catch (error: any) {
-    if ((error as any).code === "ENOENT") {
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       console.log("   ⚠ GitHub issues cache file not found, skipping...\n");
     } else {
-      console.error(`   ERROR: Failed to import GitHub issues: ${error.message}\n`);
+      console.error(`   ERROR: Failed to import GitHub issues: ${error instanceof Error ? error.message : String(error)}\n`);
     }
   }
 
@@ -232,11 +232,11 @@ async function importData() {
             ]
           );
           imported++;
-        } catch (error: any) {
-          if (error.code === "23505") {
+        } catch (error: unknown) {
+          if (error && typeof error === "object" && "code" in error && error.code === "23505") {
             skipped++;
           } else {
-            console.error(`   Warning: Failed to import embedding for issue #${issueNumber}: ${error.message}`);
+            console.error(`   Warning: Failed to import embedding for issue #${issueNumber}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
       }
@@ -244,11 +244,11 @@ async function importData() {
 
     console.log(`   ✓ Imported ${imported} embeddings, skipped ${skipped} (already exist)`);
     console.log(`   Total in cache: ${Object.keys(embeddingsCache.entries).length}\n`);
-  } catch (error: any) {
-    if ((error as any).code === "ENOENT") {
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       console.log("   ⚠ Issue embeddings cache file not found, skipping...\n");
     } else {
-      console.error(`   ERROR: Failed to import issue embeddings: ${error.message}\n`);
+      console.error(`   ERROR: Failed to import issue embeddings: ${error instanceof Error ? error.message : String(error)}\n`);
     }
   }
 
@@ -317,11 +317,11 @@ async function importData() {
                 ]
               );
               imported++;
-            } catch (error: any) {
-              if (error.code === "23505") {
+            } catch (error: unknown) {
+              if (error && typeof error === "object" && "code" in error && error.code === "23505") {
                 skipped++;
               } else {
-                console.error(`   Warning: Failed to import message ${message.id}: ${error.message}`);
+                console.error(`   Warning: Failed to import message ${message.id}: ${error instanceof Error ? error.message : String(error)}`);
               }
             }
           }
@@ -362,8 +362,8 @@ async function importData() {
               ]
             );
             imported++;
-          } catch (error: any) {
-            if (error.code === "23505") {
+          } catch (error: unknown) {
+            if (error && typeof error === "object" && "code" in error && error.code === "23505") {
               skipped++;
             } else {
               console.error(`   Warning: Failed to import message ${message.id}: ${error.message}`);
@@ -374,11 +374,11 @@ async function importData() {
 
       console.log(`   ✓ Imported ${imported} messages, skipped ${skipped} (already exist)`);
       console.log(`   Total in cache: ${discordCache.total_count || 0}\n`);
-    } catch (error: any) {
-      if ((error as any).code === "ENOENT") {
+    } catch (error: unknown) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
         console.log(`   ⚠ Discord cache file ${discordFile} not found, skipping...\n`);
       } else {
-        console.error(`   ERROR: Failed to import Discord messages: ${error.message}\n`);
+        console.error(`   ERROR: Failed to import Discord messages: ${error instanceof Error ? error.message : String(error)}\n`);
       }
     }
   }

@@ -36,7 +36,23 @@ export class JiraIntegration extends BasePMTool {
   }
 
   async createIssue(issue: PMToolIssue): Promise<{ id: string; url: string }> {
-    const issueData: any = {
+    interface JiraIssueFields {
+      project: { key: string };
+      summary: string;
+      description: {
+        type: string;
+        version: number;
+        content: Array<{
+          type: string;
+          content?: Array<{ type: string; text: string }>;
+        }>;
+      };
+      issuetype: { name: string };
+      priority?: { name: string };
+      labels?: string[];
+    }
+    
+    const issueData: { fields: JiraIssueFields } = {
       fields: {
         project: {
           key: this.projectId || "PROJ", // Default project key
@@ -105,7 +121,21 @@ export class JiraIntegration extends BasePMTool {
   }
 
   async updateIssue(issueId: string, updates: Partial<PMToolIssue>): Promise<void> {
-    const updateData: any = {
+    interface JiraUpdateFields {
+      summary?: string;
+      description?: {
+        type: string;
+        version: number;
+        content: Array<{
+          type: string;
+          content?: Array<{ type: string; text: string }>;
+        }>;
+      };
+      priority?: { name: string };
+      labels?: string[];
+    }
+    
+    const updateData: { fields: JiraUpdateFields } = {
       fields: {},
     };
 

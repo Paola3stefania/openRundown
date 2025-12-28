@@ -4,6 +4,7 @@
  */
 import type { DiscordCache } from "./discordCache.js";
 import type { ClassificationHistory } from "./classificationHistory.js";
+import type { IssuesCache } from "../../connectors/github/client.js";
 
 export interface ICacheStorage {
   /**
@@ -23,8 +24,8 @@ export interface ICacheStorage {
   /**
    * GitHub issues cache operations
    */
-  loadGitHubIssuesCache(cachePath: string): Promise<any>;
-  saveGitHubIssuesCache(cachePath: string, cache: any): Promise<void>;
+  loadGitHubIssuesCache(cachePath: string): Promise<IssuesCache | null>;
+  saveGitHubIssuesCache(cachePath: string, cache: IssuesCache): Promise<void>;
   githubIssuesCacheExists(cachePath: string): Promise<boolean>;
 }
 

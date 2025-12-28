@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
+import type { Prisma } from "@prisma/client";
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
 import { getConfig } from "../../config/index.js";
@@ -166,13 +167,13 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
           return prisma.issueEmbedding.upsert({
             where: { issueNumber },
             update: {
-              embedding: entry.embedding as any,
+              embedding: entry.embedding as Prisma.InputJsonValue,
               contentHash: entry.contentHash,
               model: currentModel,
             },
             create: {
               issueNumber,
-              embedding: entry.embedding as any,
+              embedding: entry.embedding as Prisma.InputJsonValue,
               contentHash: entry.contentHash,
               model: currentModel,
             },
@@ -255,7 +256,7 @@ export async function createEmbeddings(
       });
 
       if (!response.ok) {
-        let errorData: any;
+        let errorData: { error?: { message?: string } } | undefined;
         try {
           errorData = await response.json();
         } catch {
@@ -288,7 +289,7 @@ export async function createEmbeddings(
 
       const data = await response.json();
       // Return embeddings in the same order as input texts
-      return data.data.map((item: any) => item.embedding);
+      return (data.data as Array<{ embedding: number[] }>).map((item) => item.embedding);
     } catch (error) {
       if (attempt === retries - 1) {
         throw error;

@@ -79,7 +79,7 @@ export async function loadDiscordCache(
     : join(process.cwd(), cachePath);
 
   const content = await readFile(filePath, "utf-8");
-  const data = JSON.parse(content) as any;
+  const data = JSON.parse(content) as Partial<DiscordCache> & { messages?: DiscordMessage[] };
   
   // Handle backward compatibility: convert old format (messages array) to new format (threads + main_messages)
   if (data.messages && !data.threads) {

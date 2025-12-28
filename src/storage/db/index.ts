@@ -5,6 +5,7 @@
 import type { IStorage } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
 import type { DocumentationContent } from "../../export/documentationFetcher.js";
+import type { ProductFeature } from "../../export/types.js";
 import { prisma } from "./prisma.js";
 import { Decimal } from "@prisma/client/runtime/client";
 
@@ -235,7 +236,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getGroups(channelId: string, options?: { status?: "pending" | "exported" }): Promise<Group[]> {
-    const where: any = { channelId };
+    const where: { channelId: string; status?: "pending" | "exported" } = { channelId };
     if (options?.status) {
       where.status = options.status;
     }
@@ -589,7 +590,7 @@ export class DatabaseStorage implements IStorage {
     await prisma.documentationCache.deleteMany({});
   }
 
-  async saveFeatures(urls: string[], features: any[], docCount: number): Promise<void> {
+  async saveFeatures(urls: string[], features: ProductFeature[], docCount: number): Promise<void> {
     // Sort URLs for consistent comparison
     const sortedUrls = [...urls].map((u) => u.toLowerCase().trim()).sort();
 
@@ -624,7 +625,7 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  async getFeatures(urls: string[]): Promise<{ features: any[]; extracted_at: string; documentation_count: number } | null> {
+  async getFeatures(urls: string[]): Promise<{ features: ProductFeature[]; extracted_at: string; documentation_count: number } | null> {
     // Sort URLs for consistent comparison
     const sortedUrls = [...urls].map((u) => u.toLowerCase().trim()).sort();
 
@@ -658,11 +659,11 @@ export class DatabaseStorage implements IStorage {
       features: features.map((f) => ({
         id: f.id,
         name: f.name,
-        description: f.description,
-        category: f.category,
-        priority: f.priority,
+        description: f.description ?? "",
+        category: f.category ?? undefined,
+        priority: f.priority as "high" | "medium" | "low" | undefined,
         related_keywords: f.relatedKeywords,
-        documentation_section: f.documentationSection,
+        documentation_section: f.documentationSection ?? undefined,
       })),
       extracted_at: mostRecent?.extractedAt.toISOString() ?? new Date().toISOString(),
       documentation_count: features.length,
@@ -781,7 +782,7 @@ export class DatabaseStorage implements IStorage {
     in_group?: boolean;
     matched_to_threads?: boolean;
   }>> {
-    const where: any = {};
+    const where: { inGroup?: boolean; matchedToThreads?: boolean; issueState?: string } = {};
     if (options?.inGroup !== undefined) {
       where.inGroup = options.inGroup;
     }
