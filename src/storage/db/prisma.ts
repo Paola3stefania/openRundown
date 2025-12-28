@@ -41,4 +41,3 @@ export async function checkPrismaConnection(): Promise<boolean> {
     return false;
   }
 }
-
