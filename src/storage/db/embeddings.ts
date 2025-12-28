@@ -728,6 +728,10 @@ export async function computeAndSaveThreadEmbeddings(
     select: { 
       id: true,
       content: true,
+      channelId: true,
+      createdAt: true,
+      authorUsername: true,
+      url: true,
     },
     orderBy: { createdAt: "asc" },
   });
@@ -737,6 +741,54 @@ export async function computeAndSaveThreadEmbeddings(
   let standaloneCached = 0;
   let threadsNeedingEmbedding = threadsToEmbed.length;
   
+  // For standalone messages, we need to ensure they exist in ClassifiedThread table
+  // (required by foreign key constraint in ThreadEmbedding)
+  // First, check which standalone messages already have ClassifiedThread entries
+  const standaloneThreadIds = standaloneMessages.map(m => m.id);
+  const existingStandaloneThreads = await prisma.classifiedThread.findMany({
+    where: { threadId: { in: standaloneThreadIds } },
+    select: { threadId: true },
+  });
+  const existingStandaloneThreadIds = new Set(existingStandaloneThreads.map(t => t.threadId));
+
+  // Batch create ClassifiedThread entries for standalone messages that don't have them
+  // Use individual upserts instead of createMany to handle special characters better
+  if (standaloneMessages.length > 0) {
+    const messagesToCreate = standaloneMessages.filter(m => !existingStandaloneThreadIds.has(m.id));
+    
+    if (messagesToCreate.length > 0) {
+      console.error(`[Embeddings] Creating ${messagesToCreate.length} ClassifiedThread entries for standalone messages`);
+      
+      // Use individual upserts in a transaction to handle special characters
+      await prisma.$transaction(async (tx) => {
+        await Promise.all(
+          messagesToCreate.map(message => {
+            // Sanitize thread name - limit length and handle special characters
+            const threadName = `Standalone Message: ${(message.content || '').substring(0, 50).replace(/\0/g, '')}...`;
+            
+            return tx.classifiedThread.upsert({
+              where: { threadId: message.id },
+              update: {},
+              create: {
+                threadId: message.id,
+                channelId: message.channelId,
+                threadName: threadName,
+                messageCount: 1,
+                firstMessageId: message.id,
+                firstMessageAuthor: message.authorUsername || null,
+                firstMessageTimestamp: message.createdAt,
+                firstMessageUrl: message.url || null,
+                status: "completed",
+                matchStatus: null,
+              },
+            });
+          })
+        );
+      });
+    }
+  }
+
+  // Now process standalone messages for embedding
   for (const message of standaloneMessages) {
     // Use message ID as thread ID for standalone messages (consistent with classification)
     const threadId = message.id;
