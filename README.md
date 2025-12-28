@@ -104,12 +104,14 @@ UNMute supports two storage backends:
   - SQL queries for advanced analysis
   - Concurrent access support
   - Auto-detected when `DATABASE_URL` is set
-  - **All classification results saved to database** when `DATABASE_URL` is configured
+  - **Required when configured**: When `DATABASE_URL` is set, all data is saved to PostgreSQL (no fallback to JSON)
+  - Messages are saved in batches to prevent transaction timeouts
   - See [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) for setup
 
-Switch between backends using `STORAGE_BACKEND` environment variable or by setting/removing `DATABASE_URL`.
+Switch between backends by setting or removing `DATABASE_URL` environment variable.
 
-**Note:** When `DATABASE_URL` is set, all operations (classification, grouping, feature extraction) automatically save to PostgreSQL instead of JSON files. This includes:
+**Note:** When `DATABASE_URL` is set, all operations automatically save to PostgreSQL instead of JSON files. Database saves are **required** - if the database is unavailable, operations will fail (no silent fallback to JSON). This includes:
+- Discord messages → `discord_messages` table
 - Classified threads → `classified_threads` table
 - Thread-issue matches → `thread_issue_matches` table
 - Groups → `groups` table
@@ -235,10 +237,12 @@ The `classify_discord_messages` MCP tool automatically:
 3. Classifies messages with issues
 
 You can also fetch separately:
-- `fetch_github_issues`: Fetch and cache GitHub issues
-- `fetch_discord_messages`: Fetch and cache Discord messages
+- `fetch_github_issues`: Fetch and cache GitHub issues (saves to database if `DATABASE_URL` is set)
+- `fetch_discord_messages`: Fetch and cache Discord messages (saves to database if `DATABASE_URL` is set, or JSON cache if not)
 
-**Note:** Classification requires cached issues. The classification tool will automatically fetch them if needed.
+**Note:** 
+- Classification requires cached issues. The classification tool will automatically fetch them if needed.
+- When `DATABASE_URL` is set, `fetch_discord_messages` saves messages to PostgreSQL in batches (500 messages per batch) to ensure reliable storage for large datasets.
 
 **Incremental Saving:**
 - Processes messages in batches of 50

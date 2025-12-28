@@ -966,14 +966,19 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: JSON.stringify({
                 success: true,
-                message: incremental && newIssues.length > 0
-                  ? `Updated cache with ${newIssues.length} new/updated issues`
-                  : `Fetched ${finalIssues.length} issues`,
+                message: savedToDatabase
+                  ? (incremental && newIssues.length > 0
+                      ? `Updated database with ${newIssues.length} new/updated issues`
+                      : `Saved ${finalIssues.length} issues to database`)
+                  : (incremental && newIssues.length > 0
+                      ? `Updated cache with ${newIssues.length} new/updated issues`
+                      : `Fetched ${finalIssues.length} issues`),
                 total: cacheData.total_count,
                 open: cacheData.open_count,
                 closed: cacheData.closed_count,
                 new_updated: incremental ? newIssues.length : finalIssues.length,
-                cache_path: cachePath,
+                cache_path: savedToDatabase ? undefined : cachePath,
+                storage: savedToDatabase ? "database" : "json",
               }, null, 2),
             },
           ],

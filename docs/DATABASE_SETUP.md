@@ -2,6 +2,8 @@
 
 PostgreSQL is optional - JSON files are used by default.
 
+**Important:** When `DATABASE_URL` is set, database saves are **required**. Operations will fail if the database is unavailable (no silent fallback to JSON). To use JSON storage, ensure `DATABASE_URL` is not set.
+
 ## Quick Setup
 
 ### 1. Install PostgreSQL
@@ -56,6 +58,19 @@ npx prisma migrate dev
 
 ## Switch Back to JSON
 
+To switch back to JSON file storage, you can either:
+
+**Option 1: Remove DATABASE_URL** (Recommended)
+```bash
+# Remove DATABASE_URL from .env file, or unset it
+unset DATABASE_URL
+```
+
+**Option 2: Force JSON mode**
 ```env
 STORAGE_BACKEND=json
 ```
+
+This forces JSON storage even if `DATABASE_URL` is set (useful for testing).
+
+**Important:** When `DATABASE_URL` is set and `STORAGE_BACKEND` is not explicitly set to `json`, database saves are **required**. Operations will fail if the database is unavailable (no silent fallback to JSON). To use JSON storage, either unset `DATABASE_URL` or set `STORAGE_BACKEND=json`.
