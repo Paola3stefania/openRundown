@@ -1955,15 +1955,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await saveProgressToFile(allClassified.length);
           
           // Save to database if configured (batch write)
-          try {
-            const { getStorage } = await import("../storage/factory.js");
-            const storage = getStorage();
-            
-            // Convert batch threads to ClassifiedThread format for database
-            const threadsToSave: ClassifiedThread[] = [];
-            
-            // Add threads from this batch that were classified
-            for (const classifiedMsg of batchClassified) {
+          if (useDatabase) {
+            try {
+              const { getStorage } = await import("../storage/factory.js");
+              const storage = getStorage();
+              
+              // Check if database is actually available before attempting to save
+              const dbAvailable = await storage.isAvailable();
+              if (!dbAvailable) {
+                console.error(`[Classification] Database is configured but not available, skipping database save for this batch`);
+              } else {
+                // Convert batch threads to ClassifiedThread format for database
+                const threadsToSave: ClassifiedThread[] = [];
+                
+                // Add threads from this batch that were classified
+                for (const classifiedMsg of batchClassified) {
               const msg = classifiedMsg.message as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
               const threadId = msg.threadId || classifiedMsg.message.id;
               const threadData = threadMap.get(threadId);
@@ -1992,11 +1998,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     created_at: issue.created_at,
                   })),
                 });
+                }
               }
-            }
-            
-            // Add threads from this batch that had no matches
-            for (const msg of batch) {
+              
+              // Add threads from this batch that had no matches
+              for (const msg of batch) {
               const threadMsg = msg as DiscordMessage & { threadId?: string; threadName?: string; messageIds?: string[] };
               const threadId = threadMsg.threadId || msg.id;
               const threadData = threadMap.get(threadId);
@@ -2066,9 +2072,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               await storage.saveClassifiedThreads(threadsToSave);
               console.error(`[Classification] Saved ${threadsToSave.length} threads to database.`);
             }
-          } catch (dbError) {
-            // Log database error but don't fail classification
-            console.error(`[Classification] Database save error (continuing):`, dbError);
+              }
+            } catch (dbError) {
+              // Log database error but don't fail classification
+              // Don't fall back to JSON - database is configured, so we should only use DB
+              console.error(`[Classification] Database save error for batch ${batchNum} (continuing):`, dbError instanceof Error ? dbError.message : String(dbError));
+            }
           }
           
           console.error(`[Classification] Batch ${batchNum}/${totalBatches} complete. Saved ${threadMap.size} total threads to file.`);

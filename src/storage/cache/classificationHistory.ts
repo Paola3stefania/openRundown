@@ -174,21 +174,31 @@ export async function loadClassificationHistory(resultsDir: string, channelId?: 
 
 /**
  * Save classification history
- * Saves to database if DATABASE_URL is set, otherwise saves to JSON file
+ * Saves to database if available, otherwise saves to JSON file as fallback
  */
 export async function saveClassificationHistory(
   history: ClassificationHistory,
   resultsDir: string
 ): Promise<void> {
-  // Check if database is available
+  // Check if database is configured
   const hasDatabase = !!(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
 
   if (hasDatabase) {
-    // Save to database using Prisma
     try {
-      const { prisma } = await import("../db/prisma.js");
       const { getStorage } = await import("../factory.js");
       const storage = getStorage();
+      
+      // Check if database is actually available before attempting to save
+      const dbAvailable = await storage.isAvailable();
+      
+      if (!dbAvailable) {
+        console.error("[ClassificationHistory] Database is configured but not available, falling back to JSON");
+        await saveClassificationHistoryToFile(history, resultsDir);
+        return;
+      }
+
+      // Database is available, save using Prisma
+      const { prisma } = await import("../db/prisma.js");
 
       // First, ensure all channels exist (to satisfy foreign key constraints)
       const channelIds = new Set<string>();
@@ -240,15 +250,19 @@ export async function saveClassificationHistory(
           });
         }
       });
+      
+      console.error("[ClassificationHistory] Successfully saved to database");
+      return;
     } catch (error) {
       // If database save fails, fall back to JSON
-      console.error("[ClassificationHistory] Database save failed, falling back to JSON:", error);
+      console.error("[ClassificationHistory] Database save failed, falling back to JSON:", error instanceof Error ? error.message : String(error));
       await saveClassificationHistoryToFile(history, resultsDir);
+      return;
     }
-  } else {
-    // Save to JSON file
-    await saveClassificationHistoryToFile(history, resultsDir);
   }
+  
+  // No database configured, save to JSON file
+  await saveClassificationHistoryToFile(history, resultsDir);
 }
 
 /**
