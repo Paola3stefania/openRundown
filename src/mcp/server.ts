@@ -1218,6 +1218,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ? channel.guild?.id
         : undefined;
 
+      // Ensure channel exists in database (for foreign key constraints)
+      // Do this after we have the channel name and guild ID
+      try {
+        const { getStorage } = await import("../storage/factory.js");
+        const storage = getStorage();
+        await storage.upsertChannel(actualChannelId, channelName, guildId);
+      } catch (error) {
+        console.error(`[Classification] Failed to upsert channel (continuing):`, error);
+      }
+
       // Check if cache exists for incremental update
       let existingDiscordCache: DiscordCache | null = null;
       let sinceDiscordDate: string | undefined = undefined;
@@ -1368,6 +1378,43 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use the freshly fetched Discord cache
       const allCachedMessages = getAllMessagesFromCache(finalDiscordCache);
       
+      // Check database for already-classified threads (if database is available)
+      let dbClassifiedThreadIds = new Set<string>();
+      try {
+        const { getStorage } = await import("../storage/factory.js");
+        const dbStorage = getStorage();
+        const dbClassifiedThreads = await dbStorage.getClassifiedThreads(actualChannelId);
+        for (const thread of dbClassifiedThreads) {
+          dbClassifiedThreadIds.add(thread.thread_id);
+          // Also mark all messages in the thread as classified
+          if (thread.first_message_id) {
+            classificationHistory.messages[thread.first_message_id] = {
+              message_id: thread.first_message_id,
+              channel_id: thread.channel_id,
+              issues_matched: thread.issues.map((i) => ({ issue_number: i.number, similarity_score: i.similarity_score })),
+              classified_at: thread.classified_at,
+            };
+          }
+          // Mark thread as completed in history
+          if (!classificationHistory.threads) {
+            classificationHistory.threads = {};
+          }
+          classificationHistory.threads[thread.thread_id] = {
+            thread_id: thread.thread_id,
+            channel_id: thread.channel_id,
+            status: thread.status,
+            issues_matched: thread.issues.map((i) => ({ issue_number: i.number, similarity_score: i.similarity_score })),
+            classified_at: thread.classified_at,
+          };
+        }
+        if (dbClassifiedThreads.length > 0) {
+          console.error(`[Classification] Found ${dbClassifiedThreads.length} already-classified threads in database`);
+        }
+      } catch (dbError) {
+        // Database not available or error, continue with JSON history only
+        console.error(`[Classification] Could not load from database (continuing with JSON history):`, dbError);
+      }
+
       // Check if this is first-time classification (no classified messages or threads)
       const isFirstTimeClassification = Object.keys(classificationHistory.messages).length === 0 && 
                                        (!classificationHistory.threads || Object.keys(classificationHistory.threads).length === 0);
@@ -1401,10 +1448,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 );
 
                 // Filter to only include messages we haven't classified yet (unless re_classify)
-                // Also skip if the thread was already classified (after migration)
+                // Also skip if the thread was already classified (after migration or in database)
                 // Note: "classifying" threads will be reset to "pending" later and retried
                 const threadStatus = getThreadStatus(threadId, classificationHistory);
-                const isThreadAlreadyClassified = !re_classify && threadStatus === "completed";
+                const isThreadAlreadyClassified = !re_classify && (
+                  threadStatus === "completed" || 
+                  dbClassifiedThreadIds.has(threadId)
+                );
 
                 if (!isThreadAlreadyClassified) {
                   const unclassifiedThreadMessages = re_classify
@@ -1418,10 +1468,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
             } else {
               // Standalone message (treat as single-message thread for consistency)
-              // Check if this message has already been classified (either as a message or as a thread)
+              // Check if this message has already been classified (either as a message or as a thread, or in database)
               const isAlreadyClassified = !re_classify && (
                 classificationHistory.messages[msg.id] || 
-                getThreadStatus(msg.id, classificationHistory) === "completed"
+                getThreadStatus(msg.id, classificationHistory) === "completed" ||
+                dbClassifiedThreadIds.has(msg.id)
               );
               
               if (!standaloneMessagesMap.has(msg.id) && !isAlreadyClassified) {

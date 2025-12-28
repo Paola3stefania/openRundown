@@ -10,7 +10,7 @@ import { createHash } from "crypto";
 import type { GitHubIssue, DiscordMessage, ClassifiedMessage } from "./classifier.js";
 import { logWarn } from "../../mcp/logger.js";
 import { getConfig } from "../../config/index.js";
-import { query, checkConnection } from "../../storage/db/client.js";
+import { prisma, checkPrismaConnection } from "../../storage/db/prisma.js";
 
 // Progress logging to stderr (doesn't interfere with MCP JSON-RPC on stdout)
 function logProgress(message: string) {
@@ -82,7 +82,7 @@ async function isDatabaseAvailable(): Promise<boolean> {
   }
   
   try {
-    dbAvailable = await checkConnection();
+    dbAvailable = await checkPrismaConnection();
     return dbAvailable;
   } catch {
     dbAvailable = false;
@@ -99,22 +99,20 @@ async function loadPersistentCache(): Promise<PersistentEmbeddingCache> {
   // Try database first if available
   if (await isDatabaseAvailable()) {
     try {
-      const result = await query<{
-        issue_number: number;
-        embedding: number[];
-        content_hash: string;
-      }>(
-        `SELECT issue_number, embedding, content_hash 
-         FROM issue_embeddings 
-         WHERE model = $1`,
-        [currentModel]
-      );
+      const embeddings = await prisma.issueEmbedding.findMany({
+        where: { model: currentModel },
+        select: {
+          issueNumber: true,
+          embedding: true,
+          contentHash: true,
+        },
+      });
       
       const entries: { [key: string]: PersistentEmbeddingEntry } = {};
-      for (const row of result.rows) {
-        entries[row.issue_number.toString()] = {
-          embedding: row.embedding,
-          contentHash: row.content_hash,
+      for (const row of embeddings) {
+        entries[row.issueNumber.toString()] = {
+          embedding: row.embedding as number[],
+          contentHash: row.contentHash,
           createdAt: new Date().toISOString(),
         };
       }
@@ -161,21 +159,28 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
   if (await isDatabaseAvailable()) {
     try {
       // Save all entries to database in a batch
-      for (const [issueNumberStr, entry] of Object.entries(entries)) {
-        const issueNumber = parseInt(issueNumberStr, 10);
-        if (!isNaN(issueNumber)) {
-          await query(
-            `INSERT INTO issue_embeddings (issue_number, embedding, content_hash, model, updated_at)
-             VALUES ($1, $2::jsonb, $3, $4, NOW())
-             ON CONFLICT (issue_number) 
-             DO UPDATE SET 
-               embedding = $2::jsonb,
-               content_hash = $3,
-               model = $4,
-               updated_at = NOW()`,
-            [issueNumber, JSON.stringify(entry.embedding) as any, entry.contentHash, currentModel]
-          );
-        }
+      const operations = Object.entries(entries)
+        .filter(([issueNumberStr]) => !isNaN(parseInt(issueNumberStr, 10)))
+        .map(([issueNumberStr, entry]) => {
+          const issueNumber = parseInt(issueNumberStr, 10);
+          return prisma.issueEmbedding.upsert({
+            where: { issueNumber },
+            update: {
+              embedding: entry.embedding as any,
+              contentHash: entry.contentHash,
+              model: currentModel,
+            },
+            create: {
+              issueNumber,
+              embedding: entry.embedding as any,
+              contentHash: entry.contentHash,
+              model: currentModel,
+            },
+          });
+        });
+      
+      if (operations.length > 0) {
+        await prisma.$transaction(operations);
       }
       logProgress(`Saved ${Object.keys(entries).length} issue embeddings to database`);
       return;

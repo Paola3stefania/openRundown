@@ -1,0 +1,267 @@
+// Prisma schema for UNMute MCP Database
+// Generated from existing migrations
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Channel {
+  id        String   @id
+  name      String?
+  guildId   String?  @map("guild_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  classifiedThreads ClassifiedThread[]
+  groups            Group[]
+  ungroupedThreads  UngroupedThread[]
+  history           ClassificationHistory[]
+
+  @@index([guildId])
+  @@map("channels")
+}
+
+model ClassifiedThread {
+  threadId              String   @id @map("thread_id")
+  channelId             String   @map("channel_id")
+  threadName            String?  @map("thread_name")
+  messageCount          Int      @default(1) @map("message_count")
+  firstMessageId        String?  @map("first_message_id")
+  firstMessageAuthor    String?  @map("first_message_author")
+  firstMessageTimestamp DateTime? @map("first_message_timestamp")
+  firstMessageUrl       String?  @map("first_message_url")
+  classifiedAt          DateTime @default(now()) @map("classified_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  status                String   @default("completed") // 'pending' | 'classifying' | 'completed' | 'failed'
+
+  channel      Channel             @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  issueMatches ThreadIssueMatch[]
+  groupThreads GroupThread[]
+  ungrouped    UngroupedThread?
+  history      ClassificationHistory[]
+
+  @@index([channelId])
+  @@index([status])
+  @@map("classified_threads")
+}
+
+model ThreadIssueMatch {
+  id              Int      @id @default(autoincrement())
+  threadId        String   @map("thread_id")
+  issueNumber     Int      @map("issue_number")
+  issueTitle      String   @map("issue_title")
+  issueUrl        String   @map("issue_url")
+  issueState      String?  @map("issue_state")
+  similarityScore Decimal  @map("similarity_score") @db.Decimal(5, 2)
+  matchedTerms    String[] @map("matched_terms")
+  issueLabels     String[] @map("issue_labels")
+  issueAuthor     String?  @map("issue_author")
+  issueCreatedAt  DateTime? @map("issue_created_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  thread ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+
+  @@unique([threadId, issueNumber])
+  @@index([threadId])
+  @@index([issueNumber])
+  @@index([similarityScore(sort: Desc)])
+  @@map("thread_issue_matches")
+}
+
+model Group {
+  id                    String    @id
+  channelId             String    @map("channel_id")
+  githubIssueNumber     Int?      @map("github_issue_number")
+  suggestedTitle        String    @map("suggested_title")
+  avgSimilarity         Decimal?  @map("avg_similarity") @db.Decimal(5, 2)
+  threadCount           Int       @default(0) @map("thread_count")
+  isCrossCutting        Boolean   @default(false) @map("is_cross_cutting")
+  status                String    @default("pending") // 'pending' | 'exported'
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  exportedAt            DateTime? @map("exported_at")
+  linearIssueId         String?   @map("linear_issue_id")
+  linearIssueUrl        String?   @map("linear_issue_url")
+  linearIssueIdentifier String?   @map("linear_issue_identifier")
+  linearProjectIds      String[]  @map("linear_project_ids")
+  affectsFeatures       Json      @default("[]") @map("affects_features")
+
+  channel      Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  groupThreads GroupThread[]
+
+  @@index([channelId])
+  @@index([status])
+  @@index([githubIssueNumber])
+  @@index([affectsFeatures], type: Gin)
+  @@map("groups")
+}
+
+model GroupThread {
+  id              Int      @id @default(autoincrement())
+  groupId         String   @map("group_id")
+  threadId        String   @map("thread_id")
+  similarityScore Decimal? @map("similarity_score") @db.Decimal(5, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  group   Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  thread  ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+
+  @@unique([groupId, threadId])
+  @@index([groupId])
+  @@index([threadId])
+  @@map("group_threads")
+}
+
+model UngroupedThread {
+  threadId            String   @id @map("thread_id")
+  channelId           String   @map("channel_id")
+  reason              String   // 'no_matches' | 'below_threshold'
+  topIssueNumber      Int?     @map("top_issue_number")
+  topIssueTitle       String?  @map("top_issue_title")
+  topIssueSimilarity  Decimal? @map("top_issue_similarity") @db.Decimal(5, 2)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  channel Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  thread  ClassifiedThread @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+
+  @@index([channelId])
+  @@index([reason])
+  @@map("ungrouped_threads")
+}
+
+model ClassificationHistory {
+  id          Int       @id @default(autoincrement())
+  channelId   String    @map("channel_id")
+  messageId   String    @map("message_id")
+  threadId    String?   @map("thread_id")
+  classifiedAt DateTime @default(now()) @map("classified_at")
+
+  channel Channel? @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  thread  ClassifiedThread? @relation(fields: [threadId], references: [threadId], onDelete: Cascade)
+
+  @@unique([channelId, messageId])
+  @@map("classification_history")
+}
+
+model IssueEmbedding {
+  issueNumber Int      @id @map("issue_number")
+  embedding   Json     // Array of floats (1536 dimensions)
+  contentHash String   @map("content_hash")
+  model       String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([contentHash])
+  @@index([model])
+  @@map("issue_embeddings")
+}
+
+model DocumentationCache {
+  url       String   @id
+  title     String?
+  content   String
+  fetchedAt DateTime @default(now()) @map("fetched_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sections      DocumentationSection[]
+  embeddings    DocumentationEmbedding?
+  sectionEmbeddings DocumentationSectionEmbedding[]
+
+  @@index([fetchedAt(sort: Desc)])
+  @@map("documentation_cache")
+}
+
+model DocumentationSection {
+  id              Int      @id @default(autoincrement())
+  documentationUrl String  @map("documentation_url")
+  title           String
+  content         String
+  sectionUrl      String?  @map("section_url")
+  sectionOrder    Int      @default(0) @map("section_order")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  documentation DocumentationCache @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
+  embedding      DocumentationSectionEmbedding?
+
+  @@index([documentationUrl])
+  @@index([documentationUrl, sectionOrder])
+  @@map("documentation_sections")
+}
+
+model DocumentationSectionEmbedding {
+  sectionId       Int      @id @map("section_id")
+  documentationUrl String  @map("documentation_url")
+  embedding       Json     // Array of floats (1536 dimensions)
+  contentHash     String   @map("content_hash")
+  model           String
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  section      DocumentationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  documentation DocumentationCache  @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
+
+  @@index([documentationUrl])
+  @@index([contentHash])
+  @@index([model])
+  @@map("documentation_section_embeddings")
+}
+
+model DocumentationEmbedding {
+  documentationUrl String   @id @map("documentation_url")
+  embedding        Json     // Array of floats (1536 dimensions)
+  contentHash      String   @map("content_hash")
+  model            String
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  documentation DocumentationCache @relation(fields: [documentationUrl], references: [url], onDelete: Cascade)
+
+  @@index([contentHash])
+  @@index([model])
+  @@map("documentation_embeddings")
+}
+
+model Feature {
+  id                  String   @id
+  name                String
+  description         String?
+  category            String?
+  priority            String?
+  relatedKeywords     String[] @map("related_keywords")
+  documentationSection String? @map("documentation_section")
+  documentationUrls   String[] @map("documentation_urls")
+  extractedAt         DateTime @default(now()) @map("extracted_at")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  embedding FeatureEmbedding?
+
+  @@index([name])
+  @@index([category])
+  @@index([priority])
+  @@index([relatedKeywords], type: Gin)
+  @@index([documentationUrls], type: Gin)
+  @@index([extractedAt(sort: Desc)])
+  @@map("features")
+}
+
+model FeatureEmbedding {
+  featureId   String   @id @map("feature_id")
+  embedding   Json     // Array of floats (1536 dimensions)
+  contentHash String   @map("content_hash")
+  model       String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@index([contentHash])
+  @@index([model])
+  @@map("feature_embeddings")
+}
+
