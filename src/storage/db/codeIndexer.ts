@@ -126,6 +126,7 @@ function buildSearchQuery(featureName: string, keywords: string[]): string {
  * Search for code and index it
  * This is called when we don't have code indexed for a feature yet
  * @param chunkSize Number of files to process per chunk (default: 100)
+ * @param maxFiles Maximum number of files to fetch and index (default: 100). Limits total files, not just chunk size.
  */
 export async function searchAndIndexCode(
   searchQuery: string,
@@ -133,7 +134,8 @@ export async function searchAndIndexCode(
   featureId: string,
   featureName: string,
   force: boolean = false,
-  chunkSize: number = 100
+  chunkSize: number = 100,
+  maxFiles: number = 100
 ): Promise<string> {
   try {
     // Check if we've searched for this query before
@@ -182,7 +184,7 @@ export async function searchAndIndexCode(
     if (localRepoPath) {
       log(`[CodeIndexer] Attempting to fetch code from local repository: ${localRepoPath}`);
       const { fetchLocalCodeContext } = await import("../../connectors/github/localCodeFetcher.js");
-      rawCodeContext = await fetchLocalCodeContext(localRepoPath, searchQuery, 20);
+      rawCodeContext = await fetchLocalCodeContext(localRepoPath, searchQuery, maxFiles);
       
       if (rawCodeContext) {
         log(`[CodeIndexer] Successfully fetched code from local repository (${rawCodeContext.length} characters)`);
@@ -980,7 +982,7 @@ export async function matchTextToFeaturesUsingCode(
       if (localRepoPath) {
         log(`[CodeIndexer] Attempting to fetch code from local repository: ${localRepoPath}`);
         const { fetchLocalCodeContext } = await import("../../connectors/github/localCodeFetcher.js");
-        rawCodeContext = await fetchLocalCodeContext(localRepoPath, text, 20);
+        rawCodeContext = await fetchLocalCodeContext(localRepoPath, text, 100); // Default to 100 for matchTextToFeaturesUsingCode
         
         if (rawCodeContext) {
           log(`[CodeIndexer] Successfully fetched code from local repository (${rawCodeContext.length} characters)`);
@@ -1179,13 +1181,15 @@ export async function searchAndIndexCodeForGroup(
  * @param onProgress Optional progress callback
  * @param localRepoPathOverride Optional local repo path override
  * @param chunkSize Number of files to process per chunk (default: 100)
+ * @param maxFiles Maximum number of files to index (default: 100). Limits total files processed, not just chunk size.
  */
 export async function indexCodeForAllFeatures(
   repositoryUrl?: string,
   force: boolean = false,
   onProgress?: (processed: number, total: number) => void,
   localRepoPathOverride?: string,
-  chunkSize: number = 100
+  chunkSize: number = 100,
+  maxFiles: number = 100
 ): Promise<{ indexed: number; matched: number; total: number }> {
   const { getConfig } = await import("../../config/index.js");
   const config = getConfig();
@@ -1279,7 +1283,8 @@ export async function indexCodeForAllFeatures(
     "", // No specific feature ID - just index code
     "all_features",
     force,
-    chunkSize
+    chunkSize,
+    maxFiles
   );
 
   if (!codeContext) {

@@ -595,6 +595,20 @@ const tools: Tool[] = [
           type: "string",
           description: "Optional: Override the configured GITHUB_REPO_URL. If not provided, uses the configured GITHUB_REPO_URL from environment.",
         },
+        max_files: {
+          type: "number",
+          description: "Maximum number of files to index (default: 100). This limits the total number of files processed, not just the chunk size. Lower values process faster but may miss relevant code.",
+          default: 100,
+          minimum: 1,
+          maximum: 1000,
+        },
+        chunk_size: {
+          type: "number",
+          description: "Number of files to process per chunk (default: 100). This is for batching the processing, not a total limit. Use max_files to limit total files.",
+          default: 100,
+          minimum: 1,
+          maximum: 500,
+        },
       },
     },
   },
@@ -1743,11 +1757,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "index_code_for_features": {
-      const { force = false, local_repo_path, github_repo_url, chunk_size } = args as {
+      const { force = false, local_repo_path, github_repo_url, chunk_size, max_files } = args as {
         force?: boolean;
         local_repo_path?: string;
         github_repo_url?: string;
         chunk_size?: number;
+        max_files?: number;
       };
 
       // Helper function to find git repository root
@@ -1820,7 +1835,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       
       try {
         const chunkSize = chunk_size ?? 100;
-        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize);
+        const maxFiles = max_files ?? 100;
+        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize, maxFiles);
         
         // Get diagnostic info (use the same variables we already have)
         const githubRepoUrl = repositoryUrl;

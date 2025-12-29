@@ -32,8 +32,10 @@ export async function fetchLocalCodeContext(
     log(`[LocalCodeFetcher] Scanning repository at: ${resolvedPath}`);
 
     // Collect all code files from source directories (no keyword filtering)
+    // Find all files first, then limit processing to maxFiles
     const scannedDirs = new Set<string>();
-    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], 200, scannedDirs);
+    // Use a high limit for discovery (10000) to find all files, but we'll limit processing later
+    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], 10000, scannedDirs);
     log(`[LocalCodeFetcher] Found ${allCodeFiles.length} code files in repository`);
     
     // Log scanned directories summary
@@ -67,49 +69,108 @@ export async function fetchLocalCodeContext(
     log(`[LocalCodeFetcher] Computing embedding for search query...`);
     const queryEmbedding = await createEmbedding(searchQuery, apiKey);
     
+    // Check database for existing file embeddings to reuse
+    const { PrismaClient } = await import("@prisma/client");
+    const prisma = new PrismaClient();
+    const { getCodeFileEmbedding } = await import("../../storage/db/embeddings.js");
+    const { createHash } = await import("crypto");
+    
+    // Limit embedding computation to a reasonable number for ranking
+    // We'll compute embeddings for up to 500 files (or maxFiles * 5, whichever is larger)
+    // This gives us a good sample for ranking without being too expensive
+    const maxFilesForRanking = Math.max(maxFiles * 5, 500);
+    const filesToRank = allCodeFiles.slice(0, Math.min(allCodeFiles.length, maxFilesForRanking));
+    
+    log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (then select top ${maxFiles})...`);
+    log(`[LocalCodeFetcher] Checking database for existing file embeddings to reuse...`);
+    
     // Read files and compute similarities
+    // Process limited set of files for similarity ranking, then limit to top maxFiles
     const fileSimilarities: Array<{ filePath: string; relativePath: string; similarity: number; content: string }> = [];
     
-    log(`[LocalCodeFetcher] Computing embeddings and similarities for ${allCodeFiles.length} files...`);
-    for (let i = 0; i < allCodeFiles.length; i++) {
-      const filePath = allCodeFiles[i];
+    let reusedEmbeddings = 0;
+    let computedEmbeddings = 0;
+    
+    for (let i = 0; i < filesToRank.length; i++) {
+      const filePath = filesToRank[i];
       try {
         const content = await readFile(filePath, "utf-8");
         const relativePath = relative(resolvedPath, filePath);
         const keyInfo = extractKeyCodeInfo(content, relativePath);
         
         if (keyInfo) {
-          // Create text representation: file path + key info
-          const fileText = `${relativePath}\n${keyInfo}`;
+          // Try to find existing file embedding in database
+          // Look for any code file with this path and matching content hash (from any search)
+          const contentHash = createHash("md5").update(content).digest("hex");
+          const existingCodeFile = await prisma.codeFile.findFirst({
+            where: {
+              filePath: relativePath,
+              contentHash: contentHash,
+            },
+            include: {
+              embeddings: true,
+            },
+          });
           
-          // Compute embedding for file
-          const fileEmbedding = await createEmbedding(fileText, apiKey);
+          let fileEmbedding: number[] | null = null;
           
-          // Compute cosine similarity
-          const similarity = computeCosineSimilarity(queryEmbedding, fileEmbedding);
+          if (existingCodeFile?.embeddings) {
+            // Reuse existing embedding from database
+            // The embedding is stored as JSON in the database, convert it
+            const savedEmbedding = existingCodeFile.embeddings.embedding;
+            if (savedEmbedding && Array.isArray(savedEmbedding)) {
+              fileEmbedding = savedEmbedding as number[];
+              reusedEmbeddings++;
+            }
+          }
+          
+          if (!fileEmbedding) {
+            // Need to compute new embedding
+            // Use full file content for consistency with database embeddings
+            // This ensures embeddings are comparable across searches
+            const fileText = `File: ${relativePath}\n${content}`;
+            fileEmbedding = await createEmbedding(fileText, apiKey);
+            computedEmbeddings++;
+          }
+          
+          // Compute cosine similarity (semantic similarity)
+          const semanticSimilarity = computeCosineSimilarity(queryEmbedding, fileEmbedding);
+          
+          // Compute folder-based similarity boost
+          // Files in folders that match the search query get a boost
+          const folderSimilarity = computeFolderSimilarity(relativePath, searchQuery);
+          
+          // Combine semantic and folder similarity
+          // Folder similarity adds up to 0.2 boost (20% of max score)
+          // This ensures files in relevant folders rank higher
+          const combinedSimilarity = Math.min(1.0, semanticSimilarity + (folderSimilarity * 0.2));
           
           fileSimilarities.push({
             filePath,
             relativePath,
-            similarity,
+            similarity: combinedSimilarity,
             content: keyInfo
           });
         }
         
         // Log progress every 10 files
         if ((i + 1) % 10 === 0) {
-          log(`[LocalCodeFetcher] Processed ${i + 1}/${allCodeFiles.length} files...`);
+          log(`[LocalCodeFetcher] Processed ${i + 1}/${filesToRank.length} files for ranking... (reused: ${reusedEmbeddings}, computed: ${computedEmbeddings})`);
         }
       } catch (error) {
         log(`[LocalCodeFetcher] Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    
+    await prisma.$disconnect();
+    
+    log(`[LocalCodeFetcher] Embedding summary: reused ${reusedEmbeddings} from database, computed ${computedEmbeddings} new embeddings`);
 
     // Sort by similarity and take top N
     fileSimilarities.sort((a, b) => b.similarity - a.similarity);
     const topFiles = fileSimilarities.slice(0, maxFiles);
     
-    log(`[LocalCodeFetcher] Selected top ${topFiles.length} files by semantic similarity (range: ${topFiles[topFiles.length - 1]?.similarity.toFixed(3)} - ${topFiles[0]?.similarity.toFixed(3)})`);
+    log(`[LocalCodeFetcher] Selected top ${topFiles.length} files by semantic similarity from ${fileSimilarities.length} total files (similarity range: ${topFiles[topFiles.length - 1]?.similarity.toFixed(3)} - ${topFiles[0]?.similarity.toFixed(3)})`);
 
     // Format results
     const codeContexts = topFiles.map(file => 
@@ -141,6 +202,41 @@ function computeCosineSimilarity(a: number[], b: number[]): number {
   
   const denominator = Math.sqrt(normA) * Math.sqrt(normB);
   return denominator === 0 ? 0 : dotProduct / denominator;
+}
+
+/**
+ * Compute folder-based similarity
+ * Files in folders that match search query keywords get a boost
+ * Returns a value between 0 and 1
+ */
+function computeFolderSimilarity(filePath: string, searchQuery: string): number {
+  // Extract folder path (everything except filename)
+  const folderPath = filePath.substring(0, filePath.lastIndexOf("/")) || "";
+  const folderPathLower = folderPath.toLowerCase();
+  const searchQueryLower = searchQuery.toLowerCase();
+  
+  // Split search query into keywords (words longer than 2 chars)
+  const searchKeywords = searchQueryLower
+    .split(/\s+/)
+    .filter(word => word.length > 2)
+    .map(word => word.replace(/[^a-z0-9]/g, "")); // Remove punctuation
+  
+  if (searchKeywords.length === 0) {
+    return 0;
+  }
+  
+  // Check how many keywords match in the folder path
+  let matches = 0;
+  for (const keyword of searchKeywords) {
+    if (keyword.length > 2 && folderPathLower.includes(keyword)) {
+      matches++;
+    }
+  }
+  
+  // Return similarity score based on keyword matches
+  // If all keywords match, return 1.0 (full boost)
+  // If some match, return proportional score
+  return matches / searchKeywords.length;
 }
 
 /**
@@ -177,9 +273,10 @@ async function findAllCodeFiles(
   repoPath: string,
   currentPath: string = "",
   foundFiles: string[] = [],
-  maxFiles: number = 200, // Limit to prevent excessive processing
+  maxFiles: number = 10000, // High limit for discovery - we want to find all files
   scannedDirs: Set<string> = new Set()
 ): Promise<string[]> {
+  // Check limit before processing (safety limit to prevent infinite loops)
   if (foundFiles.length >= maxFiles) {
     return foundFiles;
   }
@@ -192,7 +289,10 @@ async function findAllCodeFiles(
     scannedDirs.add(currentPath || ".");
     
     for (const entry of entries) {
-      if (foundFiles.length >= maxFiles) break;
+      // Check limit at start of each iteration (safety check)
+      if (foundFiles.length >= maxFiles) {
+        break;
+      }
 
       const entryPath = currentPath ? join(currentPath, entry.name) : entry.name;
       const fullEntryPath = join(repoPath, entryPath);
@@ -229,11 +329,22 @@ async function findAllCodeFiles(
                                    !pathLower.startsWith("demo/"); // Exclude demo/src, demo/lib, etc.
 
         if (isRootSourceDir || isNestedSourceDir || currentPath === "") {
-          // Recursively search subdirectories
-          const subFiles = await findAllCodeFiles(repoPath, entryPath, foundFiles, maxFiles, scannedDirs);
-          foundFiles.push(...subFiles);
+          // Recursively search subdirectories - find all files
+          if (foundFiles.length < maxFiles) {
+            const subFiles = await findAllCodeFiles(repoPath, entryPath, foundFiles, maxFiles, scannedDirs);
+            // Add all found files (up to limit)
+            if (foundFiles.length < maxFiles) {
+              const remaining = maxFiles - foundFiles.length;
+              foundFiles.push(...subFiles.slice(0, remaining));
+            }
+          }
         }
       } else if (entry.isFile()) {
+        // Check limit before adding file (safety check)
+        if (foundFiles.length >= maxFiles) {
+          break;
+        }
+        
         // Check if it's a code file
         const ext = extname(entry.name).toLowerCase();
         const codeExtensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt"];
