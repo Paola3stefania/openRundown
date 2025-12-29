@@ -94,21 +94,37 @@ export class GitHubTokenManager {
   }
 
   /**
-   * Update rate limit info for the current token from API response
+   * Update rate limit info for a token from API response
+   * If tokenString is provided, finds the matching token; otherwise uses current token
    */
-  updateRateLimitFromResponse(response: Response): void {
+  updateRateLimitFromResponse(response: Response, tokenString?: string): void {
     const remaining = response.headers.get('X-RateLimit-Remaining');
     const limit = response.headers.get('X-RateLimit-Limit');
     const reset = response.headers.get('X-RateLimit-Reset');
 
     if (remaining !== null && limit && reset) {
-      const tokenInfo = this.tokens[this.currentIndex];
-      tokenInfo.remaining = parseInt(remaining);
-      tokenInfo.limit = parseInt(limit);
-      tokenInfo.resetAt = parseInt(reset) * 1000;
-      tokenInfo.lastUsed = Date.now();
+      let tokenInfo: TokenInfo | undefined;
       
-      console.error(`[GitHub Token Manager] Token ${this.currentIndex + 1}/${this.tokens.length}: ${tokenInfo.remaining}/${tokenInfo.limit} remaining`);
+      if (tokenString) {
+        // Find the token that was actually used
+        tokenInfo = this.tokens.find(t => t.token === tokenString);
+      }
+      
+      // If not found by string or no string provided, use current token
+      if (!tokenInfo && this.tokens.length > 0) {
+        tokenInfo = this.tokens[this.currentIndex];
+      }
+      
+      if (tokenInfo) {
+        tokenInfo.remaining = parseInt(remaining);
+        tokenInfo.limit = parseInt(limit);
+        tokenInfo.resetAt = parseInt(reset) * 1000;
+        tokenInfo.lastUsed = Date.now();
+        
+        const tokenType = tokenInfo.isAppToken ? 'GitHub App' : 'regular';
+        const tokenIndex = this.tokens.indexOf(tokenInfo) + 1;
+        console.error(`[GitHub Token Manager] ${tokenType} token ${tokenIndex}/${this.tokens.length}: ${tokenInfo.remaining}/${tokenInfo.limit} remaining`);
+      }
     }
   }
 

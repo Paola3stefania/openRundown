@@ -458,7 +458,7 @@ export async function computeAndSaveFeatureEmbeddings(
   onProgress?: (processed: number, total: number) => void,
   force: boolean = false,
   providedCodeContext?: string
-): Promise<void> {
+): Promise<{ computed: number; cached: number; total: number }> {
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is required to compute feature embeddings");
   }
@@ -479,7 +479,7 @@ export async function computeAndSaveFeatureEmbeddings(
 
   if (allFeatures.length === 0) {
     console.error(`[Embeddings] No features found in database. Make sure features are saved to the database first by calling getFeaturesFromCacheOrExtract().`);
-    return;
+    return { computed: 0, cached: 0, total: 0 };
   }
 
   console.error(`[Embeddings] Found ${allFeatures.length} features in database`);
@@ -936,9 +936,11 @@ export async function computeAndSaveFeatureEmbeddings(
 
   console.error(`[Embeddings] Found ${allFeatures.length} features, ${featuresToEmbed.length} need embeddings`);
   
+  const cached = allFeatures.length - featuresToEmbed.length;
+  
   if (featuresToEmbed.length === 0) {
     console.error(`[Embeddings] All features already have embeddings. Skipping computation.`);
-    return;
+    return { computed: 0, cached, total: allFeatures.length };
   }
 
   // Process in batches using batch embedding API
@@ -1086,6 +1088,8 @@ export async function computeAndSaveFeatureEmbeddings(
   } else {
     console.error(`[Embeddings] Successfully computed and saved embeddings for all ${processed} features.`);
   }
+  
+  return { computed: processed, cached, total: allFeatures.length };
 }
 
 /**

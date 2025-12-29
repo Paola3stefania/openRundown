@@ -509,10 +509,11 @@ async function createHeaders(tokenOrManager: string | GitHubTokenManager | undef
  */
 function updateRateLimit(
   response: Response,
-  tokenOrManager: string | GitHubTokenManager | undefined
+  tokenOrManager: string | GitHubTokenManager | undefined,
+  tokenString?: string
 ): void {
   if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
-    tokenOrManager.updateRateLimitFromResponse(response);
+    tokenOrManager.updateRateLimitFromResponse(response, tokenString);
   }
 }
 
@@ -568,8 +569,8 @@ export async function fetchAllGitHubIssues(
       const response = await fetch(url, { headers });
     
     // Update rate limit info if using token manager
-    if (response.ok) {
-      updateRateLimit(response, tokenOrManager);
+    if (response.ok && currentToken) {
+      updateRateLimit(response, tokenOrManager, currentToken);
     }
     
     // Log rate limit status periodically (every 5 pages)
@@ -595,7 +596,9 @@ export async function fetchAllGitHubIssues(
       // If rate limit error and using token manager, try to rotate token
       if ((response.status === 403 || response.status === 429) && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
         // Update rate limit info for current token before rotating
-        updateRateLimit(response, tokenOrManager);
+        if (currentToken) {
+          updateRateLimit(response, tokenOrManager, currentToken);
+        }
         
         // Try to get next available token from existing tokens or GitHub Apps
         // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
@@ -613,8 +616,8 @@ export async function fetchAllGitHubIssues(
           const retryResponse = await fetch(url, { headers });
           
           // Update rate limit info for new token
-          if (retryResponse.ok) {
-            updateRateLimit(retryResponse, tokenOrManager);
+          if (retryResponse.ok && nextToken) {
+            updateRateLimit(retryResponse, tokenOrManager, nextToken);
           }
           
           if (retryResponse.ok) {
@@ -735,8 +738,8 @@ export async function fetchAllGitHubIssues(
       const response = await fetch(url, { headers });
       
       // Update rate limit info if using token manager
-      if (response.ok) {
-        updateRateLimit(response, tokenOrManager);
+      if (response.ok && currentToken) {
+        updateRateLimit(response, tokenOrManager, currentToken);
       }
       
       // Log rate limit status periodically (every 5 pages)
@@ -762,7 +765,9 @@ export async function fetchAllGitHubIssues(
         // If rate limit error and using token manager, try to rotate token
         if ((response.status === 403 || response.status === 429) && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
           // Update rate limit info for current token before rotating
-          updateRateLimit(response, tokenOrManager);
+          if (currentToken) {
+            updateRateLimit(response, tokenOrManager, currentToken);
+          }
           
           // Try to get next available token from existing tokens or GitHub Apps
           // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
@@ -780,8 +785,8 @@ export async function fetchAllGitHubIssues(
             const retryResponse = await fetch(url, { headers });
             
             // Update rate limit info for new token
-            if (retryResponse.ok) {
-              updateRateLimit(retryResponse, tokenOrManager);
+            if (retryResponse.ok && nextToken) {
+              updateRateLimit(retryResponse, tokenOrManager, nextToken);
             }
             
             if (retryResponse.ok) {

@@ -5138,7 +5138,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         
         console.error(`[Feature Matching] Found ${alreadyMatchedGroups.length} already-matched groups, ${unmatchedGroups.length} groups to match`);
-        console.error(`[Feature Matching] Mapping ${unmatchedGroups.length} groups to ${features.length} features (saving incrementally)...`);
+        console.error(`[Feature Matching] Mapping ${unmatchedGroups.length} groups to ${features.length} features (min_similarity=${min_similarity}, saving incrementally)...`);
+        if (unmatchedGroups.length === 0) {
+          console.error(`[Feature Matching] No groups to match - all groups already have feature matches. Use force=true to re-match.`);
+        }
         
         // Process unmatched groups in batches, match each batch, then save immediately
         const BATCH_SIZE = 50; // Process 50 groups at a time
@@ -5197,8 +5200,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           g.affects_features[0]?.id === "general"
         );
         if (allGeneral && groupsWithFeatures.length > 0) {
-          console.error(`[DEBUG] WARNING: ALL ${groupsWithFeatures.length} groups matched to General! This suggests similarity scores are too low or embeddings aren't working.`);
+          console.error(`[DEBUG] WARNING: ALL ${groupsWithFeatures.length} groups matched to General! This suggests:`);
+          console.error(`[DEBUG]   - Similarity threshold (${min_similarity}) may be too high`);
+          console.error(`[DEBUG]   - Feature embeddings may not be computed`);
+          console.error(`[DEBUG]   - Group embeddings may not be computed`);
+          console.error(`[DEBUG]   - Try lowering min_similarity or checking embeddings`);
         }
+        
+        // Log summary statistics
+        const summaryCrossCuttingCount = groupsWithFeatures.filter(g => g.is_cross_cutting).length;
+        console.error(`[Feature Matching] Summary: ${groupsMatchedToSpecificFeatures.length} matched to specific features, ${summaryCrossCuttingCount} cross-cutting groups`);
 
         // Map ungrouped threads to features (skip already-matched unless force=true)
         if (groupingData.ungrouped_threads && groupingData.ungrouped_threads.length > 0) {

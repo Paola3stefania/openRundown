@@ -220,13 +220,17 @@ export async function mapGroupsToFeatures(
   }
 
   // Step 1: Get or compute embeddings for all features
+  log(`[FeatureMapper] Getting/computing embeddings for ${features.length} features...`);
   const featureEmbeddings = await getOrComputeFeatureEmbeddings(features, apiKey);
   
   // Debug: Verify embeddings were loaded
-  log(`[DEBUG] Loaded ${featureEmbeddings.size} feature embeddings out of ${features.length} features`);
+  log(`[FeatureMapper] Loaded ${featureEmbeddings.size} feature embeddings out of ${features.length} features`);
   if (featureEmbeddings.size < features.length) {
     const missingFeatures = features.filter(f => !featureEmbeddings.has(f.id));
-    log(`[DEBUG] Missing embeddings for features: ${missingFeatures.map(f => f.name).join(", ")}`);
+    log(`[FeatureMapper] WARNING: Missing embeddings for ${missingFeatures.length} features: ${missingFeatures.map(f => f.name).join(", ")}`);
+    log(`[FeatureMapper] These features will only match via rule-based or code-based matching, not semantic similarity`);
+  } else {
+    log(`[FeatureMapper] All ${features.length} features have embeddings - semantic similarity matching available`);
   }
 
   // Step 2: Map each group to features
@@ -332,8 +336,9 @@ export async function mapGroupsToFeatures(
     // Compute embedding if not found in database or content changed
     if (!groupEmbedding) {
       try {
-        log(`[FeatureMapper] Computing group embedding for group ${group.id}...`);
+        log(`[FeatureMapper] Computing group embedding for group ${group.id} (text length: ${groupTextWithCode.length} chars)...`);
         groupEmbedding = await createEmbedding(groupTextWithCode, apiKey);
+        log(`[FeatureMapper] Successfully computed group embedding for group ${group.id} (${groupEmbedding.length} dimensions)`);
         
         // Save to database if available
         if (useDatabase && groupEmbedding) {
@@ -345,11 +350,13 @@ export async function mapGroupsToFeatures(
           }
         }
       } catch (error) {
-        log(`[WARNING] Failed to create embedding for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
-        log(`[WARNING] Will still attempt rule-based and code-based matching (no semantic similarity available)`);
+        log(`[FeatureMapper] WARNING: Failed to create embedding for group ${group.id}: ${error instanceof Error ? error.message : String(error)}`);
+        log(`[FeatureMapper] Will still attempt rule-based and code-based matching (no semantic similarity available)`);
         // Set to null - we'll still try rule-based and code-based matching below
         groupEmbedding = null;
       }
+    } else {
+      log(`[FeatureMapper] Reused group embedding from database for group ${group.id}`);
     }
     
     // Find matching features using semantic similarity, keyword matching, AND code-to-feature mappings
@@ -453,7 +460,22 @@ export async function mapGroupsToFeatures(
     // Debug: Show top similarities even if below threshold
     allSimilarities.sort((a, b) => b.similarity - a.similarity);
     const top5All = allSimilarities.slice(0, 5);
-    log(`[DEBUG] Group ${group.id} top 5 similarities (threshold=${minSimilarity}): ${top5All.map(f => `${f.name}:${f.similarity.toFixed(3)}`).join(", ")}`);
+    const maxSimilarity = allSimilarities.length > 0 ? allSimilarities[0].similarity : 0;
+    log(`[FeatureMapper] Group ${group.id} top 5 similarities (threshold=${minSimilarity}, max=${maxSimilarity.toFixed(3)}): ${top5All.map(f => `${f.name}:${f.similarity.toFixed(3)}`).join(", ")}`);
+    
+    // Log why group matched or didn't match
+    if (affectedFeatures.length === 0) {
+      log(`[FeatureMapper] Group ${group.id} matched to General because:`);
+      if (maxSimilarity < minSimilarity) {
+        log(`[FeatureMapper]   - Max similarity (${maxSimilarity.toFixed(3)}) below threshold (${minSimilarity})`);
+      }
+      if (!groupEmbedding) {
+        log(`[FeatureMapper]   - No group embedding available (semantic matching disabled)`);
+      }
+      if (codeToFeatureMappings.size === 0) {
+        log(`[FeatureMapper]   - No code-based matches found`);
+      }
+    }
     
     // Sort by similarity (code-based matches first, then rule-based, then by score) and take top matches
     affectedFeatures.sort((a, b) => {
@@ -505,14 +527,27 @@ export async function mapGroupsToFeatures(
     });
   }
   
-  log(`Mapped ${groups.length} groups to features. ${mappedGroups.filter(g => g.is_cross_cutting).length} cross-cutting groups.`);
+  const crossCuttingCount = mappedGroups.filter(g => g.is_cross_cutting).length;
+  log(`[FeatureMapper] Mapped ${groups.length} groups to features. ${crossCuttingCount} cross-cutting groups.`);
   
   // Debug: Log summary of matches
   const groupsWithMatches = mappedGroups.filter(g => 
     g.affects_features && g.affects_features.length > 0 && 
     !(g.affects_features.length === 1 && g.affects_features[0].id === "general")
   );
-  log(`[DEBUG] ${groupsWithMatches.length} out of ${mappedGroups.length} groups matched to specific features (not General)`);
+  const generalOnlyCount = mappedGroups.filter(g => 
+    g.affects_features && 
+    g.affects_features.length === 1 && 
+    g.affects_features[0].id === "general"
+  ).length;
+  log(`[FeatureMapper] Summary: ${groupsWithMatches.length} matched to specific features, ${generalOnlyCount} matched to General only`);
+  
+  if (generalOnlyCount === mappedGroups.length && mappedGroups.length > 0) {
+    log(`[FeatureMapper] WARNING: All groups matched to General! Check:`);
+    log(`[FeatureMapper]   - Feature embeddings computed: ${featureEmbeddings.size}/${features.length}`);
+    log(`[FeatureMapper]   - Similarity threshold: ${minSimilarity} (try lowering to 0.4 or 0.5)`);
+    log(`[FeatureMapper]   - Group embeddings: check if group embedding computation succeeded`);
+  }
   
   return mappedGroups;
 }
