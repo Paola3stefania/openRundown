@@ -461,13 +461,54 @@ export async function mapGroupsToFeatures(
     allSimilarities.sort((a, b) => b.similarity - a.similarity);
     const top5All = allSimilarities.slice(0, 5);
     const maxSimilarity = allSimilarities.length > 0 ? allSimilarities[0].similarity : 0;
+    const secondBestSimilarity = allSimilarities.length > 1 ? allSimilarities[1].similarity : 0;
+    const similarityGap = maxSimilarity - secondBestSimilarity;
+    
     log(`[FeatureMapper] Group ${group.id} top 5 similarities (threshold=${minSimilarity}, max=${maxSimilarity.toFixed(3)}): ${top5All.map(f => `${f.name}:${f.similarity.toFixed(3)}`).join(", ")}`);
+    
+    // Smart matching: If no features matched via strict threshold, use relative ranking
+    // Accept matches if:
+    // 1. Max similarity >= 0.4 AND there's a clear winner (gap >= 0.1) - indicates a strong relative match
+    // 2. Max similarity >= 0.5 - moderate confidence threshold
+    // 3. Rule-based or code-based matches (already handled above)
+    if (affectedFeatures.length === 0 && maxSimilarity > 0) {
+      const relaxedThreshold = 0.4; // Lower threshold for relative matching
+      const minGapForRelativeMatch = 0.1; // Minimum gap to consider it a "clear winner"
+      
+      if (maxSimilarity >= relaxedThreshold && similarityGap >= minGapForRelativeMatch) {
+        // Clear winner with moderate similarity - accept it
+        const topFeature = allSimilarities[0];
+        log(`[FeatureMapper] Group ${group.id}: Using relative ranking - top feature "${topFeature.name}" (${maxSimilarity.toFixed(3)}) is ${similarityGap.toFixed(3)} above second-best, accepting despite being below strict threshold`);
+        affectedFeatures.push({
+          id: topFeature.id,
+          similarity: maxSimilarity,
+          ruleBased: false,
+          codeBased: false,
+        });
+      } else if (maxSimilarity >= 0.5) {
+        // Moderate confidence - accept if above 0.5
+        const topFeature = allSimilarities[0];
+        log(`[FeatureMapper] Group ${group.id}: Accepting top feature "${topFeature.name}" with moderate confidence (${maxSimilarity.toFixed(3)} >= 0.5)`);
+        affectedFeatures.push({
+          id: topFeature.id,
+          similarity: maxSimilarity,
+          ruleBased: false,
+          codeBased: false,
+        });
+      }
+    }
     
     // Log why group matched or didn't match
     if (affectedFeatures.length === 0) {
       log(`[FeatureMapper] Group ${group.id} matched to General because:`);
       if (maxSimilarity < minSimilarity) {
-        log(`[FeatureMapper]   - Max similarity (${maxSimilarity.toFixed(3)}) below threshold (${minSimilarity})`);
+        if (maxSimilarity < 0.4) {
+          log(`[FeatureMapper]   - Max similarity (${maxSimilarity.toFixed(3)}) too low (< 0.4) for any matching`);
+        } else if (similarityGap < 0.1) {
+          log(`[FeatureMapper]   - Max similarity (${maxSimilarity.toFixed(3)}) below threshold (${minSimilarity}) and no clear winner (gap: ${similarityGap.toFixed(3)} < 0.1)`);
+        } else {
+          log(`[FeatureMapper]   - Max similarity (${maxSimilarity.toFixed(3)}) below threshold (${minSimilarity})`);
+        }
       }
       if (!groupEmbedding) {
         log(`[FeatureMapper]   - No group embedding available (semantic matching disabled)`);

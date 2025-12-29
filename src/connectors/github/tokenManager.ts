@@ -148,6 +148,11 @@ export class GitHubTokenManager {
    * Falls back between GitHub App tokens and regular tokens when rate limits are hit
    */
   async getNextAvailableToken(): Promise<string | null> {
+    console.error(`[GitHub Token Manager] getNextAvailableToken: Starting search for available token...`);
+    console.error(`[GitHub Token Manager]   - GitHub Apps: ${this.githubAppAuths.length}`);
+    console.error(`[GitHub Token Manager]   - Regular tokens: ${this.tokens.filter(t => !t.isAppToken).length}`);
+    console.error(`[GitHub Token Manager]   - App tokens in cache: ${this.tokens.filter(t => t.isAppToken).length}`);
+    
     // Try both GitHub Apps and regular tokens, checking availability
     const allTokenSources: Array<{ type: 'app' | 'token'; index: number; tokenInfo?: TokenInfo }> = [];
     
@@ -162,6 +167,8 @@ export class GitHubTokenManager {
         allTokenSources.push({ type: 'token', index: i, tokenInfo: this.tokens[i] });
       }
     }
+    
+    console.error(`[GitHub Token Manager]   - Total token sources to try: ${allTokenSources.length}`);
     
     // Try each source, starting from current indices
     const startAppIndex = this.currentAppIndex;
@@ -180,7 +187,11 @@ export class GitHubTokenManager {
           const existingToken = this.tokens.find(t => t.isAppToken && t.token === token);
           if (existingToken) {
             // Check if this cached app token has available requests
-            if (this.hasAvailableRequestsForToken(existingToken)) {
+            const isAvailable = this.hasAvailableRequestsForToken(existingToken);
+            console.error(`[GitHub Token Manager] Checking GitHub App token (cached): ${existingToken.remaining}/${existingToken.limit} remaining, reset in ${Math.ceil((existingToken.resetAt - Date.now()) / 1000 / 60)} min, available: ${isAvailable}`);
+            
+            if (isAvailable) {
+              console.error(`[GitHub Token Manager] Found available GitHub App token (cached): ${existingToken.remaining}/${existingToken.limit} remaining`);
               return token;
             } else {
               // App token exhausted, try next app or fall back to regular tokens
@@ -191,6 +202,7 @@ export class GitHubTokenManager {
             }
           } else {
             // Fresh app token, use it (assume it has available requests)
+            console.error(`[GitHub Token Manager] Got fresh GitHub App token, using it`);
             return token;
           }
         } catch (error) {
@@ -216,7 +228,11 @@ export class GitHubTokenManager {
           }
           
           // Check if this token is available
-          if (this.hasAvailableRequestsForToken(tokenInfo)) {
+          const isAvailable = this.hasAvailableRequestsForToken(tokenInfo);
+          console.error(`[GitHub Token Manager] Checking regular token ${this.currentIndex + 1}: ${tokenInfo.remaining}/${tokenInfo.limit} remaining, reset in ${Math.ceil((tokenInfo.resetAt - Date.now()) / 1000 / 60)} min, available: ${isAvailable}`);
+          
+          if (isAvailable) {
+            console.error(`[GitHub Token Manager] Found available regular token ${this.currentIndex + 1}: ${tokenInfo.remaining}/${tokenInfo.limit} remaining`);
             return tokenInfo.token;
           }
           
@@ -328,6 +344,42 @@ export class GitHubTokenManager {
       }
       return token.remaining === 0;
     });
+  }
+
+  /**
+   * Get reset times grouped by token type (GitHub App vs regular)
+   */
+  getResetTimesByType(): { appTokens: Array<{ index: number; resetAt: number; resetIn: number }>; regularTokens: Array<{ index: number; resetAt: number; resetIn: number }> } {
+    const appTokens: Array<{ index: number; resetAt: number; resetIn: number }> = [];
+    const regularTokens: Array<{ index: number; resetAt: number; resetIn: number }> = [];
+    
+    this.tokens.forEach((token, index) => {
+      const resetIn = Math.max(0, Math.ceil((token.resetAt - Date.now()) / 1000 / 60));
+      const tokenInfo = {
+        index: index + 1,
+        resetAt: token.resetAt,
+        resetIn,
+      };
+      
+      if (token.isAppToken) {
+        appTokens.push(tokenInfo);
+      } else {
+        regularTokens.push(tokenInfo);
+      }
+    });
+    
+    return { appTokens, regularTokens };
+  }
+
+  /**
+   * Check if a token string is from a GitHub App or regular token
+   */
+  getTokenType(tokenString: string): 'app' | 'regular' | 'unknown' {
+    const tokenInfo = this.tokens.find(t => t.token === tokenString);
+    if (tokenInfo) {
+      return tokenInfo.isAppToken ? 'app' : 'regular';
+    }
+    return 'unknown';
   }
 
   /**

@@ -1,6 +1,7 @@
 /**
  * Lazy code indexing service
  * Automatically indexes code when matching features - only indexes what's needed
+ * Also supports proactive indexing for all features (similar to documentation workflow)
  */
 
 import { PrismaClient } from "@prisma/client";
@@ -638,17 +639,25 @@ async function mapCodeToFeature(
           matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
         }
         
-        if (similarity > 0.3) {
-          await prisma.featureCodeMapping.create({
-            data: {
-              id: createHash("md5").update(`${featureId}:${section.id}`).digest("hex"),
-              featureId,
-              codeSectionId: section.id,
-              similarity,
-              matchType,
-              searchQuery: featureName,
-            },
-          });
+        // Lower threshold to 0.2 to catch more matches (was 0.3)
+        // This matches the threshold in matchTextToFeaturesUsingCode
+        if (similarity > 0.2) {
+          try {
+            await prisma.featureCodeMapping.create({
+              data: {
+                id: createHash("md5").update(`${featureId}:${section.id}`).digest("hex"),
+                featureId,
+                codeSectionId: section.id,
+                similarity,
+                matchType,
+                searchQuery: featureName,
+              },
+            });
+            log(`[CodeIndexer] Created mapping: ${section.sectionName} -> ${featureName} (similarity: ${similarity.toFixed(3)}, type: ${matchType})`);
+          } catch (error) {
+            // Mapping might already exist, ignore
+            log(`[CodeIndexer] Mapping already exists or error: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
       }
     }
@@ -876,25 +885,35 @@ export async function matchTextToFeaturesUsingCode(
           const sectionContentHash = createHash("md5").update(section.sectionContent).digest("hex");
           const sectionEmbedding = await getCodeSectionEmbedding(section.id, sectionContentHash);
           
-          if (!sectionEmbedding) {
-            log(`[CodeIndexer] No embedding found or content changed for section ${section.sectionName}, skipping semantic matching (will be computed on next index)`);
-            continue; // Skip if no embedding or content changed (will be computed on next index)
-          }
-          
-          // Match to all features using semantic similarity
+          // Match to all features
           for (const feature of features) {
-            const featureEmbedding = featureEmbeddings.get(feature.id);
+            let similarity = 0;
+            let matchType = "keyword";
             
-            if (!featureEmbedding) {
-              // Feature embedding not available, skip
-              continue;
+            if (sectionEmbedding) {
+              // Use semantic similarity if section embedding exists
+              const featureEmbedding = featureEmbeddings.get(feature.id);
+              
+              if (featureEmbedding) {
+                // Compute cosine similarity using saved embeddings
+                similarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
+                matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "semantic" : "keyword";
+                log(`[CodeIndexer] Semantic similarity for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
+              } else {
+                // Feature embedding not available, fall back to keyword matching
+                similarity = computeSimpleSimilarity(feature.name, section.sectionName, section.sectionContent);
+                matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
+                log(`[CodeIndexer] Keyword similarity (no feature embedding) for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
+              }
+            } else {
+              // No section embedding - fall back to keyword matching
+              similarity = computeSimpleSimilarity(feature.name, section.sectionName, section.sectionContent);
+              matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "keyword" : "semantic";
+              log(`[CodeIndexer] Keyword similarity (no section embedding) for ${section.sectionName} -> ${feature.name}: ${similarity.toFixed(3)}`);
             }
             
-            // Compute cosine similarity using saved embeddings
-            const similarity = computeCosineSimilarity(featureEmbedding, sectionEmbedding);
-            const matchType = similarity > 0.7 ? "exact" : similarity > 0.5 ? "semantic" : "keyword";
-            
-            if (similarity > 0.3) {
+            // Lower threshold to 0.2 to catch more matches (was 0.3)
+            if (similarity > 0.2) {
               const currentSim = featureSimilarities.get(feature.id) || 0;
               featureSimilarities.set(feature.id, Math.max(currentSim, similarity));
               
@@ -921,7 +940,7 @@ export async function matchTextToFeaturesUsingCode(
                     searchQuery: text,
                   },
                 });
-                log(`[CodeIndexer] Saved mapping: ${section.sectionName} -> ${feature.name} (similarity: ${similarity.toFixed(3)})`);
+                log(`[CodeIndexer] Saved mapping: ${section.sectionName} -> ${feature.name} (similarity: ${similarity.toFixed(3)}, type: ${matchType})`);
               } catch (error) {
                 // Mapping might already exist, ignore
                 log(`[CodeIndexer] Mapping already exists or error: ${error instanceof Error ? error.message : String(error)}`);
@@ -954,5 +973,176 @@ export async function searchAndIndexCodeForGroup(
   featureSimilarities: Map<string, number>; // featureId -> similarity
 }> {
   return matchTextToFeaturesUsingCode(groupText, repositoryUrl, features);
+}
+
+/**
+ * Proactively index code for all features (similar to documentation workflow)
+ * OPTIMIZED: Indexes codebase once with a broad query, then matches all code sections to all features
+ * This is much faster than indexing per feature
+ * @param repositoryUrl Optional repository URL (uses config if not provided)
+ * @param force If true, re-indexes even if code is already indexed
+ * @param onProgress Optional progress callback
+ */
+export async function indexCodeForAllFeatures(
+  repositoryUrl?: string,
+  force: boolean = false,
+  onProgress?: (processed: number, total: number) => void,
+  localRepoPathOverride?: string
+): Promise<{ indexed: number; matched: number; total: number }> {
+  const { getConfig } = await import("../../config/index.js");
+  const config = getConfig();
+  const repoUrl = repositoryUrl || config.pmIntegration?.github_repo_url;
+  const localRepoPath = localRepoPathOverride || config.pmIntegration?.local_repo_path;
+  
+  // Check repository configuration
+  log(`[CodeIndexer] Checking repository configuration...`);
+  if (localRepoPath) {
+    log(`[CodeIndexer] LOCAL_REPO_PATH configured: ${localRepoPath}`);
+    try {
+      const { existsSync, statSync } = await import("fs");
+      if (existsSync(localRepoPath)) {
+        const stats = statSync(localRepoPath);
+        if (stats.isDirectory()) {
+          log(`[CodeIndexer] Local repository path exists and is a directory`);
+          // Check if it looks like a git repository
+          const gitPath = `${localRepoPath}/.git`;
+          if (existsSync(gitPath)) {
+            log(`[CodeIndexer] Found .git directory - repository is valid`);
+          } else {
+            log(`[CodeIndexer] Warning: No .git directory found - may not be a git repository`);
+          }
+        } else {
+          log(`[CodeIndexer] Error: LOCAL_REPO_PATH exists but is not a directory`);
+        }
+      } else {
+        log(`[CodeIndexer] Error: LOCAL_REPO_PATH does not exist: ${localRepoPath}`);
+      }
+    } catch (error) {
+      log(`[CodeIndexer] Error checking local repository path: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    log(`[CodeIndexer] LOCAL_REPO_PATH not configured`);
+  }
+  
+  if (repoUrl) {
+    log(`[CodeIndexer] GITHUB_REPO_URL configured: ${repoUrl}`);
+  } else {
+    log(`[CodeIndexer] GITHUB_REPO_URL not configured`);
+  }
+  
+  if (!repoUrl && !localRepoPath) {
+    log(`[CodeIndexer] Error: Neither GITHUB_REPO_URL nor LOCAL_REPO_PATH is configured, cannot index code for features`);
+    return { indexed: 0, matched: 0, total: 0 };
+  }
+
+  // Get all features
+  const allFeatures = await prisma.feature.findMany({
+    orderBy: { id: "asc" },
+    select: {
+      id: true,
+      name: true,
+      relatedKeywords: true,
+    },
+  });
+
+  if (allFeatures.length === 0) {
+    log(`[CodeIndexer] No features found in database`);
+    return { indexed: 0, matched: 0, total: 0 };
+  }
+
+  log(`[CodeIndexer] Starting optimized code indexing for ${allFeatures.length} features...`);
+
+  // OPTIMIZATION: Index codebase once with a broad query that covers all features
+  // Collect all unique keywords from all features
+  const allKeywords = new Set<string>();
+  for (const feature of allFeatures) {
+    allKeywords.add(feature.name.toLowerCase());
+    const keywords = Array.isArray(feature.relatedKeywords) ? feature.relatedKeywords : [];
+    for (const keyword of keywords) {
+      if (keyword.length > 2) {
+        allKeywords.add(keyword.toLowerCase());
+      }
+    }
+  }
+
+  // Create a broad search query (limit to reasonable size to avoid issues)
+  const broadQuery = Array.from(allKeywords).slice(0, 50).join(" ");
+  log(`[CodeIndexer] Indexing codebase with broad query covering all features (${allKeywords.size} unique keywords)...`);
+  log(`[CodeIndexer] Search query: "${broadQuery.substring(0, 200)}${broadQuery.length > 200 ? '...' : ''}"`);
+
+  // Index code once with the broad query (no specific feature - just index the code)
+  // Use localRepoPath if available, otherwise repoUrl
+  const repoIdentifier = localRepoPath || repoUrl || "";
+  log(`[CodeIndexer] Using repository identifier: ${repoIdentifier}`);
+  
+  const codeContext = await searchAndIndexCode(
+    broadQuery,
+    repoIdentifier,
+    "", // No specific feature ID - just index code
+    "all_features",
+    force
+  );
+
+  if (!codeContext) {
+    log(`[CodeIndexer] No code found with broad query. This could mean:`);
+    log(`[CodeIndexer]   - Repository path is incorrect`);
+    log(`[CodeIndexer]   - Search query didn't match any code`);
+    log(`[CodeIndexer]   - Code fetching failed (check logs for errors)`);
+    return { indexed: 0, matched: 0, total: allFeatures.length };
+  }
+  
+  log(`[CodeIndexer] Successfully indexed code (${codeContext.length} characters)`);
+
+  log(`[CodeIndexer] Code indexed successfully. Now matching all code sections to all features...`);
+
+  // Get all indexed code sections
+  const searchId = createHash("md5").update(`${broadQuery}:${repoIdentifier}`).digest("hex");
+  const codeSearch = await prisma.codeSearch.findUnique({
+    where: { id: searchId },
+    include: {
+      codeFiles: {
+        include: {
+          codeSections: true,
+        },
+      },
+    },
+  });
+
+  if (!codeSearch || codeSearch.codeFiles.length === 0) {
+    log(`[CodeIndexer] No code files found after indexing`);
+    return { indexed: 0, matched: 0, total: allFeatures.length };
+  }
+
+  // Now match all code sections to all features in one pass
+  let matched = 0;
+  const codeFiles = codeSearch.codeFiles;
+
+  for (let i = 0; i < allFeatures.length; i++) {
+    const feature = allFeatures[i];
+    
+    try {
+      log(`[CodeIndexer] Matching code sections to feature "${feature.name}" (${i + 1}/${allFeatures.length})...`);
+      
+      // Match code sections to this feature
+      await mapCodeToFeature(codeFiles, feature.id, feature.name);
+      
+      // Count mappings created for this feature
+      const mappings = await prisma.featureCodeMapping.findMany({
+        where: { featureId: feature.id },
+      });
+      matched += mappings.length;
+      
+      log(`[CodeIndexer] Matched ${mappings.length} code sections to feature "${feature.name}"`);
+    } catch (error) {
+      log(`[CodeIndexer] Failed to match code to feature "${feature.name}": ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (onProgress) {
+      onProgress(i + 1, allFeatures.length);
+    }
+  }
+
+  log(`[CodeIndexer] Completed optimized code indexing: 1 codebase index, ${matched} total code-to-feature mappings created`);
+  return { indexed: 1, matched, total: allFeatures.length };
 }
 

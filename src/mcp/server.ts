@@ -577,6 +577,28 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "index_code_for_features",
+    description: "Proactively index code for all features (similar to documentation workflow). This searches and indexes code for each feature, matches code sections to features, and saves embeddings. This should be run before computing feature embeddings to ensure code context is available. Will use LOCAL_REPO_PATH if configured (faster), otherwise falls back to GITHUB_REPO_URL. Requires either LOCAL_REPO_PATH or GITHUB_REPO_URL to be configured. Can be called from any repository context - uses semantic search with LLM embeddings to find relevant code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        force: {
+          type: "boolean",
+          description: "Force re-indexing even if code is already indexed for features. Useful after code changes.",
+          default: false,
+        },
+        local_repo_path: {
+          type: "string",
+          description: "Optional: Override the configured LOCAL_REPO_PATH. Useful when calling from a different repository context. If not provided, uses the configured LOCAL_REPO_PATH from environment.",
+        },
+        github_repo_url: {
+          type: "string",
+          description: "Optional: Override the configured GITHUB_REPO_URL. If not provided, uses the configured GITHUB_REPO_URL from environment.",
+        },
+      },
+    },
+  },
+  {
     name: "manage_documentation_cache",
     description: "Manage documentation cache - view cached docs, pre-fetch and cache documentation, extract features from cache, or clear cache. This avoids re-fetching documentation every time features are needed.",
     inputSchema: {
@@ -1141,7 +1163,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         
         const tokenStatus = tokenManager.getStatus();
-        console.error(`[GitHub Issues] Token status: ${tokenStatus.map(t => `Token ${t.index}: ${t.remaining}/${t.limit}`).join(', ')}`);
+        const allTokens = tokenManager.getAllTokens();
+        const hasGitHubApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+        const hasRegularToken = !!(process.env.GITHUB_TOKEN);
+        
+        console.error(`[GitHub Issues] Token manager initialized:`);
+        console.error(`[GitHub Issues]   - Regular GITHUB_TOKEN: ${hasRegularToken ? 'Yes' : 'No'}`);
+        console.error(`[GitHub Issues]   - GitHub App: ${hasGitHubApp ? 'Yes' : 'No'}`);
+        console.error(`[GitHub Issues]   - Total tokens in manager: ${allTokens.length}`);
+        console.error(`[GitHub Issues] Token status: ${tokenStatus.map(t => `Token ${t.index}: ${t.remaining}/${t.limit} remaining`).join(', ')}`);
         
         console.error(`[GitHub Issues] Starting to fetch issues from GitHub API...`);
         const startTime = Date.now();
@@ -1209,17 +1239,44 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const allExhausted = tokenManager.areAllTokensExhausted();
             
             if (allExhausted) {
-              // All tokens exhausted - rate limits are per GitHub user account
-              // OAuth client rotation doesn't help (same user = same rate limit)
-              const tokenStatus = tokenManager.getStatus();
-              const nextReset = tokenStatus.length > 0 ? Math.min(...tokenStatus.map(s => s.resetIn)) : 0;
+              // All tokens exhausted - show reset times for each token type
+              const resetTimes = tokenManager.getResetTimesByType();
+              const hasApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+              const hasRegular = !!(process.env.GITHUB_TOKEN);
               
-              const rateLimitError = new Error(
-                `[RATE_LIMIT_EXHAUSTED] All GitHub tokens exhausted. Next reset in ~${nextReset} minutes. ` +
-                `Rate limits are per GitHub user account, not per OAuth client. ` +
-                `To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated). ` +
-                `The fetch has been stopped. Progress has been saved. Please wait for rate limits to reset and try again.`
-              );
+              let errorDetails = `[RATE_LIMIT_EXHAUSTED] All GitHub tokens exhausted.\n\n`;
+              
+              if (resetTimes.appTokens.length > 0) {
+                errorDetails += `GitHub App tokens (${resetTimes.appTokens.length}):\n`;
+                resetTimes.appTokens.forEach(token => {
+                  const resetDate = new Date(token.resetAt).toISOString();
+                  errorDetails += `  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)\n`;
+                });
+              } else {
+                errorDetails += `GitHub App tokens: ${hasApp ? 'configured but no tokens in cache' : 'not configured'}\n`;
+              }
+              
+              if (resetTimes.regularTokens.length > 0) {
+                errorDetails += `\nRegular tokens (${resetTimes.regularTokens.length}):\n`;
+                resetTimes.regularTokens.forEach(token => {
+                  const resetDate = new Date(token.resetAt).toISOString();
+                  errorDetails += `  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)\n`;
+                });
+              } else {
+                errorDetails += `\nRegular tokens: ${hasRegular ? 'configured but no tokens in cache' : 'not configured'}\n`;
+              }
+              
+              const allResetTimes = [...resetTimes.appTokens, ...resetTimes.regularTokens].map(t => t.resetAt);
+              const earliestReset = allResetTimes.length > 0 ? Math.min(...allResetTimes) : Date.now();
+              const earliestResetIn = Math.ceil((earliestReset - Date.now()) / 1000 / 60);
+              const earliestResetDate = new Date(earliestReset).toISOString();
+              
+              errorDetails += `\nEarliest reset: ${earliestResetDate} (in ~${earliestResetIn} minutes)\n`;
+              errorDetails += `\nNote: If tokens are from the same GitHub account, they share the same rate limit. `;
+              errorDetails += `To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated). `;
+              errorDetails += `The fetch has been stopped. Progress has been saved. Please wait for rate limits to reset and try again.`;
+              
+              const rateLimitError = new Error(errorDetails);
               
               console.error(`[GitHub Issues] ${rateLimitError.message}`);
               throw rateLimitError;
@@ -1679,6 +1736,66 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       } catch (error) {
         throw new Error(`Failed to index codebase: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "index_code_for_features": {
+      const { force = false, local_repo_path, github_repo_url } = args as {
+        force?: boolean;
+        local_repo_path?: string;
+        github_repo_url?: string;
+      };
+
+      const { getConfig } = await import("../config/index.js");
+      const config = getConfig();
+      // Use provided parameters or fall back to config
+      const repositoryUrl = github_repo_url || config.pmIntegration?.github_repo_url;
+      const localRepoPath = local_repo_path || config.pmIntegration?.local_repo_path;
+
+      if (!repositoryUrl && !localRepoPath) {
+        throw new Error("Either GITHUB_REPO_URL or LOCAL_REPO_PATH must be configured to index code for features. You can provide them as parameters or set them in the MCP config.");
+      }
+
+      const { indexCodeForAllFeatures } = await import("../storage/db/codeIndexer.js");
+      
+      console.error(`[CodeIndexing] Starting proactive code indexing for all features...`);
+      if (localRepoPath) {
+        console.error(`[CodeIndexing] Using local repository path: ${localRepoPath}`);
+      }
+      if (repositoryUrl) {
+        console.error(`[CodeIndexing] Using GitHub repository URL: ${repositoryUrl}`);
+      }
+      if (force) {
+        console.error(`[CodeIndexing] Force mode enabled - will re-index even if already indexed`);
+      }
+      
+      try {
+        const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath);
+        
+        // Get diagnostic info (use the same variables we already have)
+        const githubRepoUrl = repositoryUrl;
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Code indexing completed for all features.`,
+                indexed: result.indexed,
+                matched: result.matched,
+                total: result.total,
+                diagnostics: {
+                  local_repo_path: localRepoPath || "not configured",
+                  github_repo_url: githubRepoUrl || "not configured",
+                  local_repo_exists: localRepoPath ? (await import("fs")).existsSync(localRepoPath) : false,
+                },
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        throw new Error(`Failed to index code for features: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

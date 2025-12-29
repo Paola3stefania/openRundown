@@ -534,6 +534,57 @@ export async function fetchAllGitHubIssues(
   const repoName = repo || config.github.repo;
   const allIssueNumbers: number[] = existingIssueNumbers ? [...existingIssueNumbers] : [];
   
+  // Check for available token before starting (if using token manager)
+  if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+    const status = tokenOrManager.getStatus();
+    const allTokens = tokenOrManager.getAllTokens();
+    const hasApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+    const hasRegular = !!(process.env.GITHUB_TOKEN);
+    
+    console.error(`[GitHub] Checking token availability before starting...`);
+    console.error(`[GitHub]   - GitHub App configured: ${hasApp ? 'Yes' : 'No'}`);
+    console.error(`[GitHub]   - Regular token configured: ${hasRegular ? 'Yes' : 'No'}`);
+    console.error(`[GitHub]   - Tokens in manager: ${allTokens.length}`);
+    console.error(`[GitHub]   - Token status: ${status.map(t => `Token ${t.index}: ${t.remaining}/${t.limit} (resets in ${t.resetIn} min)`).join(', ')}`);
+    
+    const availableToken = await tokenOrManager.getNextAvailableToken();
+    if (!availableToken) {
+      const resetTimes = tokenOrManager.getResetTimesByType();
+      let errorMsg = `All GitHub tokens exhausted before starting fetch.\n\n`;
+      
+      if (resetTimes.appTokens.length > 0) {
+        errorMsg += `GitHub App tokens (${resetTimes.appTokens.length}):\n`;
+        resetTimes.appTokens.forEach(token => {
+          const resetDate = new Date(token.resetAt).toISOString();
+          errorMsg += `  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)\n`;
+        });
+      } else {
+        errorMsg += `GitHub App tokens: ${hasApp ? 'configured but no tokens in cache' : 'not configured'}\n`;
+      }
+      
+      if (resetTimes.regularTokens.length > 0) {
+        errorMsg += `\nRegular tokens (${resetTimes.regularTokens.length}):\n`;
+        resetTimes.regularTokens.forEach(token => {
+          const resetDate = new Date(token.resetAt).toISOString();
+          errorMsg += `  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)\n`;
+        });
+      } else {
+        errorMsg += `\nRegular tokens: ${hasRegular ? 'configured but no tokens in cache' : 'not configured'}\n`;
+      }
+      
+      const allResetTimes = [...resetTimes.appTokens, ...resetTimes.regularTokens].map(t => t.resetAt);
+      const earliestReset = allResetTimes.length > 0 ? Math.min(...allResetTimes) : Date.now();
+      const earliestResetIn = Math.ceil((earliestReset - Date.now()) / 1000 / 60);
+      const earliestResetDate = new Date(earliestReset).toISOString();
+      
+      errorMsg += `\nEarliest reset: ${earliestResetDate} (in ~${earliestResetIn} minutes)\n`;
+      errorMsg += `\nNote: If tokens are from the same GitHub account, they share the same rate limit.`;
+      
+      throw new Error(errorMsg);
+    }
+    console.error(`[GitHub] Starting with available token: ${availableToken.substring(0, 10)}...`);
+  }
+
   let headers = await createHeaders(tokenOrManager);
 
   // Phase 1: Paginate through all pages to collect issue numbers
@@ -553,6 +604,7 @@ export async function fetchAllGitHubIssues(
   // Fetch open issues (paginate to collect issue numbers)
   let page = 1;
   let hasMore = true;
+  let switchInfo = ''; // Track token switching information for error messages
   
   while (hasMore && (limit === undefined || allIssueNumbers.length < limit)) {
     let url = `https://api.github.com/repos/${repoOwner}/${repoName}/issues?state=open&per_page=100&page=${page}&sort=updated&direction=desc`;
@@ -565,6 +617,12 @@ export async function fetchAllGitHubIssues(
       // Get current token (may rotate if previous was exhausted)
       const currentToken = await getToken(tokenOrManager);
       headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      
+      // Determine token type for logging
+      let currentTokenType: 'app' | 'regular' | 'unknown' = 'unknown';
+      if (currentToken && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+        currentTokenType = tokenOrManager.getTokenType(currentToken);
+      }
       
       const response = await fetch(url, { headers });
     
@@ -602,14 +660,57 @@ export async function fetchAllGitHubIssues(
         
         // Try to get next available token from existing tokens or GitHub Apps
         // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
+        console.error(`[GitHub] Rate limit hit on current token, attempting to switch to next available token...`);
+        const currentTokenType = tokenOrManager.getTokenType(currentToken || '');
+        const currentTokenTypeName = currentTokenType === 'app' ? 'GitHub App' : currentTokenType === 'regular' ? 'regular' : 'unknown';
         const nextToken = await tokenOrManager.getNextAvailableToken();
         
         if (!nextToken) {
-          console.error(`[GitHub] All tokens exhausted. Rate limits are per GitHub user account.`);
+          console.error(`[GitHub] No available tokens found after attempting switch. All tokens exhausted.`);
+          switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Failed - all tokens exhausted`;
+          // All tokens exhausted - show detailed reset times
+          const resetTimes = tokenOrManager.getResetTimesByType();
+          const hasApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+          const hasRegular = !!(process.env.GITHUB_TOKEN);
+          
+          console.error(`[GitHub] All tokens exhausted.`);
+          
+          if (resetTimes.appTokens.length > 0) {
+            console.error(`[GitHub] GitHub App tokens (${resetTimes.appTokens.length}):`);
+            resetTimes.appTokens.forEach(token => {
+              const resetDate = new Date(token.resetAt).toISOString();
+              console.error(`[GitHub]   - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`);
+            });
+          } else {
+            console.error(`[GitHub] GitHub App tokens: ${hasApp ? 'configured but no tokens in cache' : 'not configured'}`);
+          }
+          
+          if (resetTimes.regularTokens.length > 0) {
+            console.error(`[GitHub] Regular tokens (${resetTimes.regularTokens.length}):`);
+            resetTimes.regularTokens.forEach(token => {
+              const resetDate = new Date(token.resetAt).toISOString();
+              console.error(`[GitHub]   - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`);
+            });
+          } else {
+            console.error(`[GitHub] Regular tokens: ${hasRegular ? 'configured but no tokens in cache' : 'not configured'}`);
+          }
+          
+          const allResetTimes = [...resetTimes.appTokens, ...resetTimes.regularTokens].map(t => t.resetAt);
+          const earliestReset = allResetTimes.length > 0 ? Math.min(...allResetTimes) : Date.now();
+          const earliestResetIn = Math.ceil((earliestReset - Date.now()) / 1000 / 60);
+          const earliestResetDate = new Date(earliestReset).toISOString();
+          
+          console.error(`[GitHub] Earliest reset: ${earliestResetDate} (in ~${earliestResetIn} minutes)`);
+          console.error(`[GitHub] Note: If tokens are from the same GitHub account, they share the same rate limit.`);
           console.error(`[GitHub] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
         }
         
         if (nextToken) {
+          const nextTokenType = tokenOrManager.getTokenType(nextToken);
+          const nextTokenTypeName = nextTokenType === 'app' ? 'GitHub App installation token' : nextTokenType === 'regular' ? 'Regular user token (PAT/OAuth)' : 'Unknown token type';
+          const nextTokenTypeShort = nextTokenType === 'app' ? 'GitHub App' : nextTokenType === 'regular' ? 'regular' : 'unknown';
+          switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Success - switched to ${nextTokenTypeShort} token`;
+          console.error(`[GitHub] Successfully switched from ${currentTokenTypeName} token to ${nextTokenTypeName}`);
           console.error(`[GitHub] Rate limit hit, rotating to next token...`);
           headers = await createHeaders(tokenOrManager); // Refresh headers with new token
           // Retry the same request with new token
@@ -665,6 +766,56 @@ export async function fetchAllGitHubIssues(
           const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
           errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
         }
+        
+        // Show which token type was used when rate limit was hit
+        if (currentToken && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          const tokenType = tokenOrManager.getTokenType(currentToken);
+          const tokenTypeName = tokenType === 'app' ? 'GitHub App installation token' : tokenType === 'regular' ? 'Regular user token (PAT/OAuth)' : 'Unknown token type';
+          errorMessage += `\n  Token used: ${tokenTypeName}`;
+          
+          // Add switch attempt information if available
+          if (switchInfo) {
+            errorMessage += switchInfo;
+          }
+        }
+        
+        // If using token manager, show detailed reset times for each token type
+        if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          const resetTimes = tokenOrManager.getResetTimesByType();
+          const hasApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+          const hasRegular = !!(process.env.GITHUB_TOKEN);
+          
+          errorMessage += '\n\nToken reset times:';
+          
+          if (resetTimes.appTokens.length > 0) {
+            errorMessage += `\n\nGitHub App tokens (${resetTimes.appTokens.length}):`;
+            resetTimes.appTokens.forEach(token => {
+              const resetDate = new Date(token.resetAt).toISOString();
+              errorMessage += `\n  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`;
+            });
+          } else {
+            errorMessage += `\n\nGitHub App tokens: ${hasApp ? 'configured but no tokens in cache' : 'not configured'}`;
+          }
+          
+          if (resetTimes.regularTokens.length > 0) {
+            errorMessage += `\n\nRegular tokens (${resetTimes.regularTokens.length}):`;
+            resetTimes.regularTokens.forEach(token => {
+              const resetDate = new Date(token.resetAt).toISOString();
+              errorMessage += `\n  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`;
+            });
+          } else {
+            errorMessage += `\n\nRegular tokens: ${hasRegular ? 'configured but no tokens in cache' : 'not configured'}`;
+          }
+          
+          const allResetTimes = [...resetTimes.appTokens, ...resetTimes.regularTokens].map(t => t.resetAt);
+          const earliestReset = allResetTimes.length > 0 ? Math.min(...allResetTimes) : Date.now();
+          const earliestResetIn = Math.ceil((earliestReset - Date.now()) / 1000 / 60);
+          const earliestResetDate = new Date(earliestReset).toISOString();
+          
+          errorMessage += `\n\nEarliest reset: ${earliestResetDate} (in ~${earliestResetIn} minutes)`;
+          errorMessage += `\n\nNote: If tokens are from the same GitHub account, they share the same rate limit.`;
+        }
+        
         // Check if token is set by looking at the limit (5000 = token, 60 = no token)
         const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
         if (hasToken) {
@@ -721,6 +872,7 @@ export async function fetchAllGitHubIssues(
   if (includeClosed) {
     page = 1;
     hasMore = true;
+    switchInfo = ''; // Reset switch info for closed issues section
     
     console.error(`[GitHub] Fetching closed issues from ${repoOwner}/${repoName}...`);
     while (hasMore && (limit === undefined || allIssueNumbers.length < limit)) {
@@ -734,6 +886,12 @@ export async function fetchAllGitHubIssues(
       // Get current token (may rotate if previous was exhausted)
       const currentToken = await getToken(tokenOrManager);
       headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      
+      // Determine token type for logging
+      let currentTokenType: 'app' | 'regular' | 'unknown' = 'unknown';
+      if (currentToken && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+        currentTokenType = tokenOrManager.getTokenType(currentToken);
+      }
       
       const response = await fetch(url, { headers });
       
@@ -771,14 +929,24 @@ export async function fetchAllGitHubIssues(
           
           // Try to get next available token from existing tokens or GitHub Apps
           // Note: Rate limits are per GitHub user account for OAuth/PAT, per installation for GitHub Apps
+          console.error(`[GitHub] Rate limit hit on current token, attempting to switch to next available token...`);
+          const currentTokenType = tokenOrManager.getTokenType(currentToken || '');
+          const currentTokenTypeName = currentTokenType === 'app' ? 'GitHub App' : currentTokenType === 'regular' ? 'regular' : 'unknown';
           const nextToken = await tokenOrManager.getNextAvailableToken();
           
           if (!nextToken) {
+            console.error(`[GitHub] No available tokens found after attempting switch. All tokens exhausted.`);
             console.error(`[GitHub] All tokens exhausted. Rate limits are per GitHub user account.`);
             console.error(`[GitHub] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
+            switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Failed - all tokens exhausted`;
           }
           
           if (nextToken) {
+            const nextTokenType = tokenOrManager.getTokenType(nextToken);
+            const nextTokenTypeName = nextTokenType === 'app' ? 'GitHub App installation token' : nextTokenType === 'regular' ? 'Regular user token (PAT/OAuth)' : 'Unknown token type';
+            const nextTokenTypeShort = nextTokenType === 'app' ? 'GitHub App' : nextTokenType === 'regular' ? 'regular' : 'unknown';
+            switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Success - switched to ${nextTokenTypeShort} token`;
+            console.error(`[GitHub] Successfully switched from ${currentTokenTypeName} token to ${nextTokenTypeName}`);
             console.error(`[GitHub] Rate limit hit, rotating to next token...`);
             headers = await createHeaders(tokenOrManager); // Refresh headers with new token
             // Retry the same request with new token
@@ -823,17 +991,67 @@ export async function fetchAllGitHubIssues(
           }
         }
         
-        let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
+      let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
+      
+      if (response.status === 403 || response.status === 429) {
+        errorMessage += '\n\nRate limit information:';
+        if (rateLimitLimit) errorMessage += `\n  Limit: ${rateLimitLimit} requests/hour`;
+        if (rateLimitRemaining !== null) errorMessage += `\n  Remaining: ${rateLimitRemaining} requests`;
+        if (rateLimitReset) {
+          const resetDate = new Date(parseInt(rateLimitReset) * 1000);
+          const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
+          errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
+        }
         
-        if (response.status === 403 || response.status === 429) {
-          errorMessage += '\n\nRate limit information:';
-          if (rateLimitLimit) errorMessage += `\n  Limit: ${rateLimitLimit} requests/hour`;
-          if (rateLimitRemaining !== null) errorMessage += `\n  Remaining: ${rateLimitRemaining} requests`;
-          if (rateLimitReset) {
-            const resetDate = new Date(parseInt(rateLimitReset) * 1000);
-            const resetIn = Math.ceil((parseInt(rateLimitReset) * 1000 - Date.now()) / 1000 / 60);
-            errorMessage += `\n  Resets at: ${resetDate.toISOString()} (in ~${resetIn} minutes)`;
+        // Show which token type was used when rate limit was hit
+        if (currentToken && tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+          const tokenType = tokenOrManager.getTokenType(currentToken);
+          const tokenTypeName = tokenType === 'app' ? 'GitHub App installation token' : tokenType === 'regular' ? 'Regular user token (PAT/OAuth)' : 'Unknown token type';
+          errorMessage += `\n  Token used: ${tokenTypeName}`;
+          
+          // Add switch attempt information if available
+          if (switchInfo) {
+            errorMessage += switchInfo;
           }
+        }
+          
+          // If using token manager, show detailed reset times for each token type
+          if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+            const resetTimes = tokenOrManager.getResetTimesByType();
+            const hasApp = !!(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_INSTALLATION_ID);
+            const hasRegular = !!(process.env.GITHUB_TOKEN);
+            
+            errorMessage += '\n\nToken reset times:';
+            
+            if (resetTimes.appTokens.length > 0) {
+              errorMessage += `\n\nGitHub App tokens (${resetTimes.appTokens.length}):`;
+              resetTimes.appTokens.forEach(token => {
+                const resetDate = new Date(token.resetAt).toISOString();
+                errorMessage += `\n  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`;
+              });
+            } else {
+              errorMessage += `\n\nGitHub App tokens: ${hasApp ? 'configured but no tokens in cache' : 'not configured'}`;
+            }
+            
+            if (resetTimes.regularTokens.length > 0) {
+              errorMessage += `\n\nRegular tokens (${resetTimes.regularTokens.length}):`;
+              resetTimes.regularTokens.forEach(token => {
+                const resetDate = new Date(token.resetAt).toISOString();
+                errorMessage += `\n  - Token ${token.index}: Resets at ${resetDate} (in ~${token.resetIn} minutes)`;
+              });
+            } else {
+              errorMessage += `\n\nRegular tokens: ${hasRegular ? 'configured but no tokens in cache' : 'not configured'}`;
+            }
+            
+            const allResetTimes = [...resetTimes.appTokens, ...resetTimes.regularTokens].map(t => t.resetAt);
+            const earliestReset = allResetTimes.length > 0 ? Math.min(...allResetTimes) : Date.now();
+            const earliestResetIn = Math.ceil((earliestReset - Date.now()) / 1000 / 60);
+            const earliestResetDate = new Date(earliestReset).toISOString();
+            
+            errorMessage += `\n\nEarliest reset: ${earliestResetDate} (in ~${earliestResetIn} minutes)`;
+            errorMessage += `\n\nNote: If tokens are from the same GitHub account, they share the same rate limit.`;
+          }
+          
           // Check if token is set by looking at the limit (5000 = token, 60 = no token)
           const hasToken = rateLimitLimit && parseInt(rateLimitLimit) >= 5000;
           if (hasToken) {
