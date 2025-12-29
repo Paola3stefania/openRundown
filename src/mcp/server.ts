@@ -4292,10 +4292,32 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           id: f.id,
           name: f.name,
           description: f.description,
+          related_keywords: f.related_keywords || [],
         }));
 
         // Log removed to avoid interfering with MCP JSON protocol
         // console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
+
+        // Compute feature embeddings if needed (before mapping groups to features)
+        // This ensures embeddings are available for semantic similarity matching
+        if (process.env.OPENAI_API_KEY) {
+          try {
+            const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+            const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+            
+            if (useDatabase) {
+              // Features are already saved to database by getFeaturesFromCacheOrExtract
+              // Now compute embeddings for any features that don't have them yet
+              const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
+              console.error(`[Feature Matching] Computing feature embeddings if needed...`);
+              await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+              console.error(`[Feature Matching] Feature embeddings ready`);
+            }
+          } catch (embeddingError) {
+            // If embedding computation fails, continue anyway - featureMapper will compute on-demand
+            console.error(`[Feature Matching] Warning: Failed to pre-compute feature embeddings (will compute on-demand):`, embeddingError);
+          }
+        }
 
         // Map groups to features
         // Log removed to avoid interfering with MCP JSON protocol

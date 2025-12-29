@@ -128,8 +128,14 @@ export async function mapGroupsToFeatures(
   const featuresToEmbed: Array<{ feature: Feature; featureText: string }> = [];
   
   for (const feature of features) {
-    // Try to get from database first
-    let embedding = await getFeatureEmbedding(feature.id);
+    // Try to get from database first (if database is available)
+    let embedding: Embedding | null = null;
+    try {
+      embedding = await getFeatureEmbedding(feature.id);
+    } catch (error) {
+      // Database not available or error - will compute on-demand
+      // This is expected when using JSON storage backend
+    }
     
     if (!embedding) {
       // Need to compute
@@ -345,7 +351,14 @@ export async function mapUngroupedThreadsToFeatures(
   const featuresToEmbed: Array<{ feature: Feature; featureText: string }> = [];
   
   for (const feature of features) {
-    let embedding = await getFeatureEmbedding(feature.id);
+    // Try to get from database first (if database is available)
+    let embedding: Embedding | null = null;
+    try {
+      embedding = await getFeatureEmbedding(feature.id);
+    } catch (error) {
+      // Database not available or error - will compute on-demand
+      // This is expected when using JSON storage backend
+    }
     
     if (!embedding) {
       const name = feature.name.trim();
