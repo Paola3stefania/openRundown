@@ -382,7 +382,8 @@ function cosineSimilarity(a: Embedding, b: Embedding): number {
 
   // Cosine similarity ranges from -1 to 1, normalize to 0-100 for consistency
   const similarity = dotProduct / denominator;
-  return Math.max(0, (similarity + 1) * 50); // Convert from [-1, 1] to [0, 100]
+  const normalized = Math.max(0, (similarity + 1) * 50); // Convert from [-1, 1] to [0, 100]
+  return Number.isNaN(normalized) ? 0 : normalized;
 }
 
 /**

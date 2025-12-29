@@ -193,6 +193,52 @@ export interface IStorage {
   // Stats
   getStats(channelId: string): Promise<StorageStats>;
   
+  // Export results operations
+  saveExportResult(result: {
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    closedItemsCount?: {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
+    closedItemsFile?: string;
+  }): Promise<void>;
+  getExportResults(channelId?: string, options?: { limit?: number; pmTool?: string }): Promise<Array<{
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: any;
+    closedItemsCount?: any;
+    closedItemsFile?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>>;
+  
   // Health check
   isAvailable(): Promise<boolean>;
 }

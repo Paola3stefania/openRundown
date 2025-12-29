@@ -8,6 +8,7 @@ import type { DocumentationContent } from "../../export/documentationFetcher.js"
 import type { ProductFeature } from "../../export/types.js";
 import { prisma } from "./prisma.js";
 import { Decimal } from "@prisma/client/runtime/client";
+import { Prisma } from "@prisma/client";
 
 export class DatabaseStorage implements IStorage {
   async upsertChannel(channelId: string, channelName?: string, guildId?: string): Promise<void> {
@@ -727,6 +728,120 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async saveExportResult(result: {
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    closedItemsCount?: {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
+    closedItemsFile?: string;
+  }): Promise<void> {
+    await prisma.exportResult.upsert({
+      where: { id: result.id },
+      update: {
+        channelId: result.channelId ?? null,
+        pmTool: result.pmTool,
+        sourceFile: result.sourceFile ?? null,
+        success: result.success,
+        featuresExtracted: result.featuresExtracted,
+        featuresMapped: result.featuresMapped,
+        issuesCreated: result.issuesCreated ?? 0,
+        issuesUpdated: result.issuesUpdated ?? 0,
+        issuesSkipped: result.issuesSkipped ?? 0,
+        errors: result.errors ?? [],
+        exportMappings: result.exportMappings ? (result.exportMappings as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsFile: result.closedItemsFile ?? null,
+      },
+      create: {
+        id: result.id,
+        channelId: result.channelId ?? null,
+        pmTool: result.pmTool,
+        sourceFile: result.sourceFile ?? null,
+        success: result.success,
+        featuresExtracted: result.featuresExtracted,
+        featuresMapped: result.featuresMapped,
+        issuesCreated: result.issuesCreated ?? 0,
+        issuesUpdated: result.issuesUpdated ?? 0,
+        issuesSkipped: result.issuesSkipped ?? 0,
+        errors: result.errors ?? [],
+        exportMappings: result.exportMappings ? (result.exportMappings as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsCount: result.closedItemsCount ? (result.closedItemsCount as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        closedItemsFile: result.closedItemsFile ?? null,
+      },
+    });
+  }
+
+  async getExportResults(channelId?: string, options?: { limit?: number; pmTool?: string }): Promise<Array<{
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: any;
+    closedItemsCount?: any;
+    closedItemsFile?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>> {
+    const where: { channelId?: string; pmTool?: string } = {};
+    if (channelId) {
+      where.channelId = channelId;
+    }
+    if (options?.pmTool) {
+      where.pmTool = options.pmTool;
+    }
+
+    const results = await prisma.exportResult.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: options?.limit,
+    });
+
+    return results.map(r => ({
+      id: r.id,
+      channelId: r.channelId ?? undefined,
+      pmTool: r.pmTool,
+      sourceFile: r.sourceFile ?? undefined,
+      success: r.success,
+      featuresExtracted: r.featuresExtracted,
+      featuresMapped: r.featuresMapped,
+      issuesCreated: r.issuesCreated,
+      issuesUpdated: r.issuesUpdated,
+      issuesSkipped: r.issuesSkipped,
+      errors: (r.errors as string[]) ?? [],
+      exportMappings: r.exportMappings,
+      closedItemsCount: r.closedItemsCount,
+      closedItemsFile: r.closedItemsFile ?? undefined,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+  }
+
   async saveDocumentation(doc: DocumentationContent): Promise<void> {
     await this.saveDocumentationMultiple([doc]);
   }
@@ -1053,10 +1168,10 @@ export class DatabaseStorage implements IStorage {
               issueAuthor: issue.author ?? null,
               issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
               issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-              issueComments: issue.comments ? (issue.comments as any) : [],
+              issueComments: issue.comments ? (issue.comments as unknown as Prisma.InputJsonValue) : [],
               issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
               issueMilestone: issue.milestone?.title ?? null,
-              issueReactions: issue.reactions ? (issue.reactions as any) : null,
+              issueReactions: issue.reactions ? (issue.reactions as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
             },
             create: {
               issueNumber: issue.number,
@@ -1068,10 +1183,10 @@ export class DatabaseStorage implements IStorage {
               issueAuthor: issue.author ?? null,
               issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
               issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
-              issueComments: issue.comments ? (issue.comments as any) : [],
+              issueComments: issue.comments ? (issue.comments as unknown as Prisma.InputJsonValue) : [],
               issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
               issueMilestone: issue.milestone?.title ?? null,
-              issueReactions: issue.reactions ? (issue.reactions as any) : null,
+              issueReactions: issue.reactions ? (issue.reactions as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
             },
           });
         }

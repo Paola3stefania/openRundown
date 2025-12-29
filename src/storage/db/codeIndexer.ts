@@ -1084,15 +1084,16 @@ function computeSimpleSimilarity(
  */
 function buildCodeContext(codeFiles: CodeFile[]): string {
   const contexts: string[] = [];
-  
+
   for (const file of codeFiles) {
+    if (!file.codeSections) continue;
     for (const section of file.codeSections) {
       contexts.push(
         `${section.sectionType}: ${section.sectionName}\n${section.sectionContent}`
       );
     }
   }
-  
+
   return contexts.join("\n\n");
 }
 

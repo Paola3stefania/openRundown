@@ -1117,5 +1117,128 @@ export class JsonStorage implements IStorage {
       return [];
     }
   }
+
+  async saveExportResult(result: {
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    closedItemsCount?: {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
+    closedItemsFile?: string;
+  }): Promise<void> {
+    await mkdir(this.resultsDir, { recursive: true });
+    
+    const exportResultData = {
+      ...result,
+      timestamp: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    
+    const exportResultsPath = join(this.resultsDir, `export-result-${result.id}.json`);
+    await writeFile(exportResultsPath, JSON.stringify(exportResultData, null, 2), "utf-8");
+  }
+
+  async getExportResults(channelId?: string, options?: { limit?: number; pmTool?: string }): Promise<Array<{
+    id: string;
+    channelId?: string;
+    pmTool: string;
+    sourceFile?: string;
+    success: boolean;
+    featuresExtracted: number;
+    featuresMapped: number;
+    issuesCreated?: number;
+    issuesUpdated?: number;
+    issuesSkipped?: number;
+    errors?: string[];
+    exportMappings?: any;
+    closedItemsCount?: any;
+    closedItemsFile?: string;
+    createdAt: string;
+    updatedAt: string;
+  }>> {
+    try {
+      const files = await readdir(this.resultsDir);
+      const exportResultFiles = files
+        .filter(f => f.startsWith('export-result-') && f.endsWith('.json'))
+        .map(f => join(this.resultsDir, f));
+      
+      const results: Array<{
+        id: string;
+        channelId?: string;
+        pmTool: string;
+        sourceFile?: string;
+        success: boolean;
+        featuresExtracted: number;
+        featuresMapped: number;
+        issuesCreated?: number;
+        issuesUpdated?: number;
+        issuesSkipped?: number;
+        errors?: string[];
+        exportMappings?: any;
+        closedItemsCount?: any;
+        closedItemsFile?: string;
+        createdAt: string;
+        updatedAt: string;
+      }> = [];
+      
+      for (const filePath of exportResultFiles) {
+        try {
+          const content = await readFile(filePath, "utf-8");
+          const data = JSON.parse(content);
+          
+          // Filter by channelId and pmTool if provided
+          if (channelId && data.channelId !== channelId) continue;
+          if (options?.pmTool && data.pmTool !== options.pmTool) continue;
+          
+          results.push({
+            id: data.id,
+            channelId: data.channelId,
+            pmTool: data.pmTool,
+            sourceFile: data.sourceFile,
+            success: data.success,
+            featuresExtracted: data.featuresExtracted,
+            featuresMapped: data.featuresMapped,
+            issuesCreated: data.issuesCreated,
+            issuesUpdated: data.issuesUpdated,
+            issuesSkipped: data.issuesSkipped,
+            errors: data.errors ?? [],
+            exportMappings: data.exportMappings,
+            closedItemsCount: data.closedItemsCount,
+            closedItemsFile: data.closedItemsFile,
+            createdAt: data.created_at || data.timestamp || data.createdAt,
+            updatedAt: data.updated_at || data.updatedAt || data.createdAt,
+          });
+        } catch (err) {
+          // Skip invalid files
+          continue;
+        }
+      }
+      
+      // Sort by createdAt descending and limit
+      results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return options?.limit ? results.slice(0, options.limit) : results;
+    } catch {
+      return [];
+    }
+  }
 }
 

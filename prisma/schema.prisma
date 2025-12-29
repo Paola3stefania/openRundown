@@ -22,6 +22,7 @@ model Channel {
   ungroupedThreads  UngroupedThread[]
   history           ClassificationHistory[]
   messages          DiscordMessage[]
+  exportResults     ExportResult[]
 
   @@index([guildId])
   @@map("channels")
@@ -542,5 +543,32 @@ model DiscordMessage {
   @@index([threadId])
   @@index([guildId])
   @@map("discord_messages")
+}
+
+model ExportResult {
+  id                String   @id
+  channelId         String?  @map("channel_id")
+  pmTool           String   @map("pm_tool")
+  sourceFile       String?  @map("source_file")
+  success          Boolean  @default(false)
+  featuresExtracted Int     @default(0) @map("features_extracted")
+  featuresMapped   Int     @default(0) @map("features_mapped")
+  issuesCreated    Int     @default(0) @map("issues_created")
+  issuesUpdated    Int     @default(0) @map("issues_updated")
+  issuesSkipped    Int     @default(0) @map("issues_skipped")
+  errors           Json    @default("[]")
+  exportMappings   Json?   @map("export_mappings") // Stores group_export_mappings, ungrouped_thread_export_mappings, etc.
+  closedItemsCount Json?   @map("closed_items_count") // Stores closed_items_count data
+  closedItemsFile  String? @map("closed_items_file")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  channel Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  @@index([channelId])
+  @@index([pmTool])
+  @@index([success])
+  @@index([createdAt(sort: Desc)])
+  @@map("export_results")
 }
 

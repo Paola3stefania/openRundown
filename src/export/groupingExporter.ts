@@ -277,26 +277,7 @@ export async function exportGroupingToPMTool(
     } catch (error) {
       logError("Error loading Discord cache for thread resolution check:", error);
     }
-    
-    // Check and save resolution status for threads in groups
-    if (discordCache) {
-      try {
-        const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
-        const { join } = await import("path");
-        const { existsSync } = await import("fs");
-        const config = getConfig();
-        const cacheDir = join(process.cwd(), config.paths.cacheDir);
-        const cacheFileName = `discord-messages-${groupingData.channel_id}.json`;
-        const cachePath = join(cacheDir, cacheFileName);
-        
-        if (existsSync(cachePath)) {
-          discordCache = await loadDiscordCache(cachePath);
-        }
-      } catch (error) {
-        logError("Error loading Discord cache for thread resolution check:", error);
-      }
-    }
-    
+
     // Check and save resolution status for threads in groups
     const resolvedThreadIds = new Set<string>();
     if (discordCache && groupsWithFeatures.length > 0) {
