@@ -90,15 +90,18 @@ export abstract class BasePMTool implements IPMTool {
         }
         
         // If no stored ID or verification failed, try finding by source ID
-        // Pass title to enable title-based search fallback for duplicate detection
-        if (!existing) {
+        // Only search if source_id is provided (duplicate detection)
+        if (!existing && issue.source_id) {
           // Check if findIssueBySourceId accepts optional title parameter (Linear implementation)
-          const findMethod = this.findIssueBySourceId as ((sourceId: string, title?: string) => Promise<{ id: string; url: string } | null>) | undefined;
-          if (findMethod && findMethod.length > 1) {
-            // Linear implementation accepts title parameter
-            existing = await findMethod(issue.source_id, issue.title);
-          } else {
-            // Other implementations only accept sourceId
+          // Use bind to preserve 'this' context
+          const findMethod = this.findIssueBySourceId.bind(this);
+          // Check if the method signature accepts a second parameter (title)
+          // We can't check function.length reliably due to TypeScript, so try with title first
+          try {
+            // Try calling with title parameter (Linear implementation)
+            existing = await (findMethod as any)(issue.source_id, issue.title);
+          } catch (error) {
+            // If that fails or method doesn't accept title, try without
             existing = await this.findIssueBySourceId(issue.source_id);
           }
         }

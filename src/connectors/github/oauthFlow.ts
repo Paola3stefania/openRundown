@@ -3,12 +3,26 @@
  * Generates tokens via OAuth - tokens are kept in memory only (no persistence)
  */
 
-import { createServer } from "http";
+import { createServer, type Server } from "http";
 import { parse } from "url";
 import { exec } from "child_process";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
+
+/**
+ * Escape HTML entities to prevent XSS
+ */
+function escapeHtml(text: string): string {
+  const htmlEntities: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return text.replace(/[&<>"']/g, (char) => htmlEntities[char] || char);
+}
 
 /**
  * Run OAuth flow and automatically get a new token
@@ -20,6 +34,37 @@ export async function getNewTokenViaOAuth(
   port = 3000
 ): Promise<string | null> {
   return new Promise((resolve, reject) => {
+    let resolved = false;
+    let server: Server | null = null;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      if (server) {
+        server.close();
+        server = null;
+      }
+    };
+
+    const safeResolve = (value: string) => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve(value);
+      }
+    };
+
+    const safeReject = (error: Error) => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        reject(error);
+      }
+    };
+
     const REDIRECT_URI = `http://localhost:${port}/callback`;
     const authUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&scope=public_repo&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
 
@@ -38,16 +83,20 @@ export async function getNewTokenViaOAuth(
       openCommand = "start";
     } else {
       console.error(`[OAuth] Unsupported platform. Please visit: ${authUrl}`);
-      reject(new Error("Unsupported platform"));
+      safeReject(new Error("Unsupported platform"));
       return;
     }
 
-    execAsync(`${openCommand} "${authUrl}"`).catch(() => {
-      console.error(`[OAuth] Could not open browser automatically. Please visit: ${authUrl}`);
+    execAsync(`${openCommand} "${authUrl}"`).catch((error) => {
+      console.error(`[OAuth] Could not open browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[OAuth] Please visit: ${authUrl}`);
+      // Don't reject - user can still manually visit the URL
     });
 
     // Create server to handle callback
-    const server = createServer(async (req, res) => {
+    server = createServer(async (req, res) => {
+      if (resolved) return; // Already handled
+
       const { query } = parse(req.url || "", true);
       const code = query.code as string;
 
@@ -77,7 +126,7 @@ export async function getNewTokenViaOAuth(
         if (tokenData.error) {
           res.writeHead(400);
           res.end(`Error: ${tokenData.error_description || tokenData.error}`);
-          reject(new Error(tokenData.error_description || tokenData.error));
+          safeReject(new Error(tokenData.error_description || tokenData.error));
           return;
         }
 
@@ -101,6 +150,7 @@ export async function getNewTokenViaOAuth(
         }
 
         const userData = await userResponse.json();
+        const safeLogin = escapeHtml(String(userData.login || "unknown"));
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`
@@ -108,7 +158,7 @@ export async function getNewTokenViaOAuth(
             <head><title>Token Generated</title></head>
             <body style="font-family: sans-serif; padding: 40px; max-width: 600px; margin: 0 auto;">
               <h1>Token Generated Successfully!</h1>
-              <p>Authorized as: <strong>${userData.login}</strong></p>
+              <p>Authorized as: <strong>${safeLogin}</strong></p>
               <p>The token will be used for this session (in memory only).</p>
               <p style="color: #666; margin-top: 30px;">You can close this window.</p>
             </body>
@@ -116,21 +166,23 @@ export async function getNewTokenViaOAuth(
         `);
 
         console.error(`[OAuth] Token generated successfully for ${userData.login}`);
-        
+
         // Token is returned to caller - no persistence needed (kept in memory only)
-        
-        // Close server
+        // Give time for response to be sent before closing
         setTimeout(() => {
-          server.close();
-          resolve(accessToken);
-        }, 1000);
+          safeResolve(accessToken);
+        }, 500);
       } catch (error) {
         res.writeHead(500);
         res.end(`Error: ${error instanceof Error ? error.message : String(error)}`);
         console.error("[OAuth] Error:", error);
-        server.close();
-        reject(error);
+        safeReject(error instanceof Error ? error : new Error(String(error)));
       }
+    });
+
+    server.on("error", (error) => {
+      console.error(`[OAuth] Server error: ${error.message}`);
+      safeReject(error);
     });
 
     server.listen(port, () => {
@@ -139,10 +191,9 @@ export async function getNewTokenViaOAuth(
     });
 
     // Timeout after 5 minutes
-    setTimeout(() => {
+    timeoutHandle = setTimeout(() => {
       console.error(`[OAuth] Timeout: No authorization received for client ${clientId.substring(0, 8)}...`);
-      server.close();
-      reject(new Error("OAuth timeout"));
+      safeReject(new Error("OAuth timeout: no authorization received within 5 minutes"));
     }, 5 * 60 * 1000);
   });
 }

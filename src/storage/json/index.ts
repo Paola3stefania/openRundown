@@ -1169,18 +1169,41 @@ export class JsonStorage implements IStorage {
     issuesUpdated?: number;
     issuesSkipped?: number;
     errors?: string[];
-    exportMappings?: any;
-    closedItemsCount?: any;
+    exportMappings?: {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    closedItemsCount?: {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
     closedItemsFile?: string;
     createdAt: string;
     updatedAt: string;
   }>> {
+    type ExportMappings = {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    type ClosedItemsCount = {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
+
     try {
       const files = await readdir(this.resultsDir);
       const exportResultFiles = files
         .filter(f => f.startsWith('export-result-') && f.endsWith('.json'))
         .map(f => join(this.resultsDir, f));
-      
+
       const results: Array<{
         id: string;
         channelId?: string;
@@ -1193,8 +1216,8 @@ export class JsonStorage implements IStorage {
         issuesUpdated?: number;
         issuesSkipped?: number;
         errors?: string[];
-        exportMappings?: any;
-        closedItemsCount?: any;
+        exportMappings?: ExportMappings;
+        closedItemsCount?: ClosedItemsCount;
         closedItemsFile?: string;
         createdAt: string;
         updatedAt: string;

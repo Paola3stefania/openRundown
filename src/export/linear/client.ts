@@ -175,9 +175,6 @@ export class LinearIntegration extends BasePMTool {
             name
             url
           }
-          error {
-            message
-          }
         }
       }
     `;
@@ -193,7 +190,8 @@ export class LinearIntegration extends BasePMTool {
         description: sanitizedDescription,
         // Note: teamIds is optional - projects are workspace-level in Linear
         // If teamId is provided, we can associate the project with the team
-        ...(this.teamId && { teamIds: [this.teamId] }),
+        // Only include teamIds if teamId is valid (non-empty string)
+        ...(this.teamId && this.teamId.trim() && { teamIds: [this.teamId] }),
       },
     };
 
@@ -201,17 +199,18 @@ export class LinearIntegration extends BasePMTool {
       const response = await this.graphqlRequest<{
         projectCreate?: {
           success: boolean;
-          error?: { message?: string };
           project?: {
             id: string;
             name: string;
+            url?: string;
           };
         };
       }>(query, variables);
       
       if (!response.data?.projectCreate?.success) {
-        const errorMsg = response.data?.projectCreate?.error?.message 
-          || (response.errors ? JSON.stringify(response.errors) : "Unknown error");
+        const errorMsg = response.errors 
+          ? response.errors.map(e => e.message).join(", ")
+          : "Unknown error";
         throw new Error(`Failed to create Linear project "${sanitizedName}": ${errorMsg}`);
       }
 
@@ -362,9 +361,14 @@ export class LinearIntegration extends BasePMTool {
     // As a fallback, try searching by title if provided
     if (title) {
       try {
-        const found = await this.searchIssueByTitle(title);
-        if (found) {
-          return found;
+        // Ensure this context is preserved
+        if (this && typeof this.searchIssueByTitle === 'function') {
+          const found = await this.searchIssueByTitle(title);
+          if (found) {
+            return found;
+          }
+        } else {
+          logError(`searchIssueByTitle method not available on LinearIntegration instance`);
         }
       } catch (error) {
         // Log but don't fail - this is a fallback
@@ -817,7 +821,24 @@ export class LinearIntegration extends BasePMTool {
     });
 
     if (!response.ok) {
-      throw new Error(`Linear API error: ${response.status} ${response.statusText}`);
+      // Try to get error details from response body
+      let errorDetails = response.statusText;
+      try {
+        const errorBody = await response.text();
+        if (errorBody) {
+          const parsed = JSON.parse(errorBody);
+          if (parsed.errors && Array.isArray(parsed.errors)) {
+            errorDetails = parsed.errors.map((e: { message?: string }) => e.message || JSON.stringify(e)).join(", ");
+          } else if (parsed.message) {
+            errorDetails = parsed.message;
+          } else {
+            errorDetails = errorBody.substring(0, 500); // Limit length
+          }
+        }
+      } catch {
+        // If parsing fails, use statusText
+      }
+      throw new Error(`Linear API error: ${response.status} ${response.statusText}. Details: ${errorDetails}`);
     }
 
     return await response.json();

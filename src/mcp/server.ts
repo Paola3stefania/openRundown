@@ -5284,12 +5284,21 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Ensure existing groups have suggested_title (backfill for old data)
             if (!group.suggested_title) {
               // Handle legacy format with github_issue nested object
-              const legacyIssue = (group as unknown as { github_issue?: { title?: string } }).github_issue;
-              if (legacyIssue?.title) {
+              // Type guard for legacy data format (group may have extra properties from JSON)
+              const groupRecord = group as unknown as Record<string, unknown>;
+              const legacyIssue = groupRecord.github_issue;
+              const hasLegacyTitle = (
+                typeof legacyIssue === 'object' &&
+                legacyIssue !== null &&
+                'title' in legacyIssue &&
+                typeof (legacyIssue as Record<string, unknown>).title === 'string'
+              );
+              if (hasLegacyTitle) {
+                const issueTitle = (legacyIssue as { title: string }).title;
                 // Use GitHub issue title if available, otherwise generate from threads
                 group.suggested_title = generateGroupTitleFromThreads(
                   group.threads || [],
-                  legacyIssue.title
+                  issueTitle
                 );
               } else if (group.threads && group.threads.length > 0) {
                 group.suggested_title = generateGroupTitleFromThreads(group.threads);

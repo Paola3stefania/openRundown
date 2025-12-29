@@ -802,8 +802,18 @@ export class DatabaseStorage implements IStorage {
     issuesUpdated?: number;
     issuesSkipped?: number;
     errors?: string[];
-    exportMappings?: any;
-    closedItemsCount?: any;
+    exportMappings?: {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    closedItemsCount?: {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
     closedItemsFile?: string;
     createdAt: string;
     updatedAt: string;
@@ -822,6 +832,19 @@ export class DatabaseStorage implements IStorage {
       take: options?.limit,
     });
 
+    type ExportMappings = {
+      group_export_mappings?: Array<{ group_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_thread_export_mappings?: Array<{ thread_id: string; id: string; url: string; identifier?: string }>;
+      ungrouped_issue_export_mappings?: Array<{ issue_number: number; id: string; url: string; identifier?: string }>;
+    };
+    type ClosedItemsCount = {
+      groups?: number;
+      ungrouped_threads?: number;
+      ungrouped_threads_closed?: number;
+      ungrouped_threads_resolved?: number;
+      ungrouped_issues?: number;
+    };
+
     return results.map(r => ({
       id: r.id,
       channelId: r.channelId ?? undefined,
@@ -834,8 +857,8 @@ export class DatabaseStorage implements IStorage {
       issuesUpdated: r.issuesUpdated,
       issuesSkipped: r.issuesSkipped,
       errors: (r.errors as string[]) ?? [],
-      exportMappings: r.exportMappings,
-      closedItemsCount: r.closedItemsCount,
+      exportMappings: r.exportMappings as ExportMappings | undefined,
+      closedItemsCount: r.closedItemsCount as ClosedItemsCount | undefined,
       closedItemsFile: r.closedItemsFile ?? undefined,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
