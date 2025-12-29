@@ -129,68 +129,123 @@ export class GitHubTokenManager {
    * Get the next available token, rotating if necessary
    * Returns null if no tokens are available
    * For GitHub Apps, automatically fetches fresh tokens
+   * Falls back between GitHub App tokens and regular tokens when rate limits are hit
    */
   async getNextAvailableToken(): Promise<string | null> {
-    // First, try GitHub Apps if available
-    if (this.githubAppAuths.length > 0) {
-      const startAppIndex = this.currentAppIndex;
-      let appAttempts = 0;
-      
-      while (appAttempts < this.githubAppAuths.length) {
+    // Try both GitHub Apps and regular tokens, checking availability
+    const allTokenSources: Array<{ type: 'app' | 'token'; index: number; tokenInfo?: TokenInfo }> = [];
+    
+    // Add GitHub App sources
+    for (let i = 0; i < this.githubAppAuths.length; i++) {
+      allTokenSources.push({ type: 'app', index: i });
+    }
+    
+    // Add regular token sources (excluding app tokens that are already in the list)
+    for (let i = 0; i < this.tokens.length; i++) {
+      if (!this.tokens[i].isAppToken) {
+        allTokenSources.push({ type: 'token', index: i, tokenInfo: this.tokens[i] });
+      }
+    }
+    
+    // Try each source, starting from current indices
+    const startAppIndex = this.currentAppIndex;
+    const startTokenIndex = this.currentIndex;
+    let attempts = 0;
+    const maxAttempts = allTokenSources.length * 2; // Try all sources twice
+    
+    while (attempts < maxAttempts) {
+      // Try GitHub Apps first if available
+      if (this.githubAppAuths.length > 0) {
         try {
           const appAuth = this.githubAppAuths[this.currentAppIndex];
           const token = await appAuth.getInstallationToken();
           
-          // Check if we have this token in cache and it's still valid
+          // Check if we have this token in cache and check its rate limit status
           const existingToken = this.tokens.find(t => t.isAppToken && t.token === token);
-          if (existingToken && this.hasAvailableRequestsForToken(existingToken)) {
+          if (existingToken) {
+            // Check if this cached app token has available requests
+            if (this.hasAvailableRequestsForToken(existingToken)) {
+              return token;
+            } else {
+              // App token exhausted, try next app or fall back to regular tokens
+              console.error(`[GitHub Token Manager] GitHub App ${this.currentAppIndex + 1} token exhausted (${existingToken.remaining} remaining, resets in ${Math.ceil((existingToken.resetAt - Date.now()) / 1000 / 60)} min), trying next source...`);
+              this.currentAppIndex = (this.currentAppIndex + 1) % this.githubAppAuths.length;
+              attempts++;
+              // Fall through to try regular tokens
+            }
+          } else {
+            // Fresh app token, use it (assume it has available requests)
             return token;
           }
-          
-          // Token is fresh, use it
-          return token;
         } catch (error) {
           console.error(`[GitHub Token Manager] Failed to get token from GitHub App ${this.currentAppIndex + 1}: ${error}`);
           this.currentAppIndex = (this.currentAppIndex + 1) % this.githubAppAuths.length;
-          appAttempts++;
+          attempts++;
+          // Fall through to try regular tokens
         }
       }
-    }
-    
-    // Fall back to regular tokens
-    const startIndex = this.currentIndex;
-    let attempts = 0;
-    
-    while (attempts < this.tokens.length) {
-      const tokenInfo = this.tokens[this.currentIndex];
       
-      // Skip app tokens in regular rotation (they're handled above)
-      if (tokenInfo.isAppToken) {
-        this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
-        attempts++;
-        continue;
+      // Try regular tokens
+      if (this.tokens.length > 0) {
+        // Find next non-app token
+        let tokenAttempts = 0;
+        while (tokenAttempts < this.tokens.length) {
+          const tokenInfo = this.tokens[this.currentIndex];
+          
+          // Skip app tokens (they're handled above)
+          if (tokenInfo.isAppToken) {
+            this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
+            tokenAttempts++;
+            continue;
+          }
+          
+          // Check if this token is available
+          if (this.hasAvailableRequestsForToken(tokenInfo)) {
+            return tokenInfo.token;
+          }
+          
+          // Token exhausted, try next one
+          console.error(`[GitHub Token Manager] Regular token ${this.currentIndex + 1} exhausted (${tokenInfo.remaining} remaining, resets in ${Math.ceil((tokenInfo.resetAt - Date.now()) / 1000 / 60)} min), trying next source...`);
+          this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
+          tokenAttempts++;
+          attempts++;
+          
+          // After trying all regular tokens, try apps again (they might have reset)
+          if (tokenAttempts >= this.tokens.filter(t => !t.isAppToken).length) {
+            break; // Break to outer loop to try apps again
+          }
+        }
       }
       
-      // Check if this token is available
-      if (this.hasAvailableRequestsForToken(tokenInfo)) {
-        return tokenInfo.token;
-      }
-      
-      // Token exhausted, try next one
-      console.error(`[GitHub Token Manager] Token ${this.currentIndex + 1} exhausted (${tokenInfo.remaining} remaining, resets in ${Math.ceil((tokenInfo.resetAt - Date.now()) / 1000 / 60)} min), rotating...`);
-      this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
       attempts++;
+      
+      // If we've tried everything, check if we should wait or give up
+      if (attempts >= maxAttempts) {
+        break;
+      }
     }
     
-    // All tokens exhausted
-    const allTokens = this.tokens.filter(t => !t.isAppToken);
-    if (allTokens.length > 0) {
-      const nextReset = Math.min(...allTokens.map(t => t.resetAt));
+    // All tokens exhausted - calculate next reset time
+    const allTokens = this.tokens;
+    const appTokens = allTokens.filter(t => t.isAppToken);
+    const regularTokens = allTokens.filter(t => !t.isAppToken);
+    
+    const resetTimes: number[] = [];
+    if (appTokens.length > 0) {
+      resetTimes.push(...appTokens.map(t => t.resetAt));
+    }
+    if (regularTokens.length > 0) {
+      resetTimes.push(...regularTokens.map(t => t.resetAt));
+    }
+    
+    if (resetTimes.length > 0) {
+      const nextReset = Math.min(...resetTimes);
       const waitMinutes = Math.ceil((nextReset - Date.now()) / 1000 / 60);
-      console.error(`[GitHub Token Manager] All tokens exhausted. Next reset in ~${waitMinutes} minutes`);
+      console.error(`[GitHub Token Manager] All tokens (GitHub App and regular) exhausted. Next reset in ~${waitMinutes} minutes`);
     } else {
       console.error(`[GitHub Token Manager] All tokens exhausted.`);
     }
+    
     return null;
   }
 

@@ -1202,14 +1202,32 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (error) {
           // Check if error is due to all tokens being exhausted
           const errorMessage = error instanceof Error ? error.message : String(error);
-          const isRateLimitError = errorMessage.includes('403') || errorMessage.includes('429') || errorMessage.includes('exhausted');
+          const isRateLimitError = errorMessage.includes('403') || errorMessage.includes('429') || errorMessage.includes('exhausted') || errorMessage.includes('RATE_LIMIT');
           
-          if (isRateLimitError && tokenManager.areAllTokensExhausted()) {
-            // All tokens exhausted - rate limits are per GitHub user account
-            // OAuth client rotation doesn't help (same user = same rate limit)
-            console.error(`[GitHub Issues] All tokens exhausted. Rate limits are per GitHub user account, not per OAuth client.`);
-            console.error(`[GitHub Issues] To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated).`);
-            throw error; // Re-throw original error
+          if (isRateLimitError) {
+            // Check if all tokens are exhausted
+            const allExhausted = tokenManager.areAllTokensExhausted();
+            
+            if (allExhausted) {
+              // All tokens exhausted - rate limits are per GitHub user account
+              // OAuth client rotation doesn't help (same user = same rate limit)
+              const tokenStatus = tokenManager.getStatus();
+              const nextReset = tokenStatus.length > 0 ? Math.min(...tokenStatus.map(s => s.resetIn)) : 0;
+              
+              const rateLimitError = new Error(
+                `[RATE_LIMIT_EXHAUSTED] All GitHub tokens exhausted. Next reset in ~${nextReset} minutes. ` +
+                `Rate limits are per GitHub user account, not per OAuth client. ` +
+                `To get separate rate limits, use tokens from different GitHub accounts via GITHUB_TOKEN (comma-separated). ` +
+                `The fetch has been stopped. Progress has been saved. Please wait for rate limits to reset and try again.`
+              );
+              
+              console.error(`[GitHub Issues] ${rateLimitError.message}`);
+              throw rateLimitError;
+            } else {
+              // Rate limit hit but tokens available - this shouldn't happen, but handle it
+              console.error(`[GitHub Issues] Rate limit error occurred: ${errorMessage}`);
+              throw new Error(`[RATE_LIMIT_ERROR] ${errorMessage}. The fetch has been stopped. Progress has been saved.`);
+            }
           } else {
             throw error; // Re-throw if not a rate limit error
           }
@@ -1323,7 +1341,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       } catch (error) {
-        throw new Error(`Failed to fetch GitHub issues: ${error instanceof Error ? error.message : error}`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // If it's already a rate limit error with our special prefix, preserve it
+        if (errorMessage.includes('[RATE_LIMIT')) {
+          throw error; // Re-throw rate limit errors as-is
+        }
+        
+        // For other errors, wrap with context
+        throw new Error(`Failed to fetch GitHub issues: ${errorMessage}`);
       }
     }
 
@@ -5041,6 +5067,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const { getFeaturesFromCacheOrExtract } = await import("../export/featureCache.js");
+        console.error(`[Feature Matching] Extracting features from ${docUrls.length} documentation URL(s)...`);
         const extractedFeatures = await getFeaturesFromCacheOrExtract(docUrls);
         const features = extractedFeatures.map(f => ({
           id: f.id,
@@ -5049,8 +5076,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           related_keywords: f.related_keywords || [],
         }));
 
-        // Log removed to avoid interfering with MCP JSON protocol
-        // console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
+        console.error(`[Feature Matching] Extracted ${features.length} features from documentation`);
+        if (features.length > 0) {
+          console.error(`[Feature Matching] Sample features: ${features.slice(0, 5).map(f => f.name).join(", ")}${features.length > 5 ? "..." : ""}`);
+        }
 
         // Compute feature embeddings if needed (before mapping groups to features)
         // This ensures embeddings are available for semantic similarity matching
@@ -5064,8 +5093,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               // Now compute embeddings for any features that don't have them yet
               const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
               console.error(`[Feature Matching] Computing feature embeddings if needed...`);
-              await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
-              console.error(`[Feature Matching] Feature embeddings ready`);
+              const embeddingResult = await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+              console.error(`[Feature Matching] Feature embeddings ready: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached, ${embeddingResult.total} total`);
+            } else {
+              console.error(`[Feature Matching] Database not available - feature embeddings will be computed on-demand`);
             }
           } catch (embeddingError) {
             // If embedding computation fails, continue anyway - featureMapper will compute on-demand

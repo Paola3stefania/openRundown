@@ -35,7 +35,7 @@ See [docs/LINEAR_GITHUB_CONTRACT.md](docs/LINEAR_GITHUB_CONTRACT.md) for the ful
 
 ### GitHub Integration
 
-- Search repository issues
+- Fetch repository issues and comments (with retry mechanism)
 - Correlate Discord discussions with GitHub issues
 - Cache issues for offline analysis
 - Incremental issue updates
@@ -149,12 +149,12 @@ Switch between backends by setting or removing `DATABASE_URL` environment variab
 
 3. Configure environment variables (see `env.example`):
    - `DISCORD_TOKEN`: Discord bot token (required)
-   - `GITHUB_TOKEN`: GitHub personal access token (optional, recommended)
    - `GITHUB_OWNER`: GitHub organization/username (required)
    - `GITHUB_REPO`: GitHub repository name (required)
+   - **GitHub Authentication** (choose one):
+     - `GITHUB_TOKEN`: Personal access token (get from https://github.com/settings/tokens)
+     - OR GitHub App: `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` (see [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md))
    - `OPENAI_API_KEY`: OpenAI API key (optional, for semantic classification)
-   - `OPENAI_EMBEDDING_MODEL`: Embedding model to use (optional, default: "text-embedding-3-small")
-     - Options: `text-embedding-3-small` (default), `text-embedding-3-large`, `text-embedding-ada-002`
    - `DOCUMENTATION_URLS`: URLs or file paths to product documentation (optional, for PM export)
    - `PM_TOOL_*`: PM tool configuration (optional, for PM export)
 
@@ -234,19 +234,9 @@ Switch between backends by setting or removing `DATABASE_URL` environment variab
 
 ### Fetching GitHub Issues
 
-**Initial Fetch:**
-```bash
-npm run fetch-issues
-```
+Use the `fetch_github_issues` MCP tool to fetch and cache GitHub issues. Comments are always fetched with automatic retry on failures.
 
-Creates `cache/github-issues-cache.json` with all issues.
-
-**Incremental Updates:**
-```bash
-npm run fetch-issues -- --incremental
-```
-
-Fetches only new or updated issues since last fetch.
+**Configuration:** Set `GITHUB_TOKEN` or GitHub App credentials (see [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md))
 
 ### Classifying Discord Messages
 
@@ -428,13 +418,17 @@ You can configure this MCP tool to be available when working in another reposito
    }
    ```
    
+   **GitHub Authentication:** Use `GITHUB_TOKEN` OR GitHub App credentials:
+   - Token: `"GITHUB_TOKEN": "your_token"`
+   - GitHub App: `"GITHUB_APP_ID": "...", "GITHUB_APP_INSTALLATION_ID": "...", "GITHUB_APP_PRIVATE_KEY_PATH": "/path/to/app.pem"`
+   
    **Required variables** (minimum):
    - `DISCORD_TOKEN` - Discord bot token
    - `GITHUB_OWNER` - GitHub org/username
    - `GITHUB_REPO` - GitHub repository name
    
    **Recommended variables**:
-   - `GITHUB_TOKEN` - For higher rate limits
+   - `GITHUB_TOKEN` or GitHub App credentials - For higher rate limits (see [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md))
    - `OPENAI_API_KEY` - For semantic classification
    - `DATABASE_URL` - For production use (PostgreSQL)
    
@@ -600,20 +594,11 @@ unmute-mcp/
 
 See the `docs/` folder for detailed documentation:
 
-### Contracts & Architecture
+- `GITHUB_INTEGRATION.md`: GitHub authentication setup (Token or GitHub App)
+- `DATABASE_SETUP.md`: PostgreSQL database setup
 - `LINEAR_GITHUB_CONTRACT.md`: How UNMute integrates with Linear's GitHub integration
 - `LINEAR_TEAM_SETUP.md`: Setting up Linear teams and projects
-
-### Features
-- `CLASSIFICATION_EXPLAINED.md`: Classification process
-- `SEMANTIC_CLASSIFICATION.md`: LLM-based semantic classification
-- `THREAD_DETECTION.md`: Discord thread handling
-
-### Integration Guides
-- `GITHUB_INTEGRATION.md`: GitHub API integration
-- `RATE_LIMIT_INFO.md`: GitHub API rate limits
-- `explain-permissions.md`: Discord bot permissions
-- `TESTING_LINEAR_EXPORT.md`: Testing the Linear export workflow
+- `explain-permissions.md`: Discord bot permissions setup
 
 ## License
 
