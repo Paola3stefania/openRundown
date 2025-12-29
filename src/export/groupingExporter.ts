@@ -239,16 +239,47 @@ export async function exportGroupingToPMTool(
     // Use groups from grouping data (already matched to features)
     // Filter: Only export groups with open GitHub issues or unresolved messages (no GitHub issue)
     // This ensures we don't export groups for closed/resolved issues
+    // Also collect closed groups for statistics tracking
+    const closedGroups: GroupingGroup[] = [];
     const groupsWithFeatures = groupingData.groups.filter(group => {
       // If group has a GitHub issue, only export if it's open
       if (group.github_issue) {
         // State should be "open" or "closed" - default to "open" if missing (conservative approach)
         const state = group.github_issue.state?.toLowerCase() || "open";
-        return state === "open";
+        if (state === "closed") {
+          closedGroups.push(group);
+          return false;
+        }
+        return true;
       }
       // If no GitHub issue, it's an unresolved Discord thread - export it
       return true;
     });
+    
+    // Save closed groups resolution status to database (batch update)
+    if (closedGroups.length > 0) {
+      try {
+        const { prisma } = await import("../storage/db/prisma.js");
+        const resolvedAt = new Date();
+        await Promise.all(
+          closedGroups.map(group =>
+            prisma.group.update({
+              where: { id: group.id },
+              data: {
+                resolutionStatus: "closed_issue",
+                resolvedAt,
+              },
+            }).catch(error => {
+              logError(`Error saving resolution status for group ${group.id}:`, error);
+              return null;
+            })
+          )
+        );
+        log(`Saved resolution status for ${closedGroups.length} closed groups to database`);
+      } catch (error) {
+        logError("Error saving closed groups resolution status to database:", error);
+      }
+    }
 
     // Create projects for features (Linear only)
     const projectMappings = new Map<string, string>(); // feature_id -> project_id
@@ -448,8 +479,157 @@ export async function exportGroupingToPMTool(
     }
 
     // STEP 2: Export ungrouped threads (threads that didn't match any issues)
-    const ungroupedThreads = groupingData.ungrouped_threads || [];
-    log(`Preparing ${ungroupedThreads.length} ungrouped threads for export...`);
+    // Filter: Only export ungrouped threads with open top_issue or no top_issue
+    // Also filter out threads that appear resolved based on conversation content
+    const allUngroupedThreads = groupingData.ungrouped_threads || [];
+    
+    // Load Discord cache to check thread messages for resolution signals
+    let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
+    try {
+      const { loadDiscordCache } = await import("../storage/cache/discordCache.js");
+      const { join } = await import("path");
+      const { existsSync } = await import("fs");
+      const config = getConfig();
+      const cacheDir = join(process.cwd(), config.paths.cacheDir);
+      const cacheFileName = `discord-messages-${groupingData.channel_id}.json`;
+      const cachePath = join(cacheDir, cacheFileName);
+      
+      if (existsSync(cachePath)) {
+        discordCache = await loadDiscordCache(cachePath);
+      }
+    } catch (error) {
+      logError("Error loading Discord cache for thread resolution check:", error);
+      // Continue without cache - we'll just skip resolution detection
+    }
+    
+    // Look up issue states for ungrouped threads that have top_issue
+    const topIssueNumbers = allUngroupedThreads
+      .map(ut => ut.top_issue?.number)
+      .filter((num): num is number => !!num);
+    
+    const topIssuesStateMap = new Map<number, string>();
+    if (topIssueNumbers.length > 0) {
+      try {
+        const { prisma } = await import("../storage/db/prisma.js");
+        const issues = await prisma.gitHubIssue.findMany({
+          where: {
+            issueNumber: { in: topIssueNumbers },
+          },
+          select: {
+            issueNumber: true,
+            issueState: true,
+          },
+        });
+        
+        for (const issue of issues) {
+          topIssuesStateMap.set(issue.issueNumber, issue.issueState || "open");
+        }
+      } catch (error) {
+        logError("Error looking up top_issue states for ungrouped threads:", error);
+        // Continue with export even if lookup fails
+      }
+    }
+    
+    // Filter ungrouped threads: skip if top_issue is closed or thread appears resolved
+    // Also collect closed/resolved ungrouped threads for statistics tracking
+    const closedUngroupedThreads: typeof allUngroupedThreads = [];
+    const resolvedUngroupedThreads: typeof allUngroupedThreads = [];
+    const ungroupedThreads: typeof allUngroupedThreads = [];
+    
+    // Process threads (need to use loop instead of filter due to async LLM calls)
+    for (const thread of allUngroupedThreads) {
+      // Check if top_issue is closed
+      if (thread.top_issue?.number) {
+        const issueState = topIssuesStateMap.get(thread.top_issue.number)?.toLowerCase() || "open";
+        // Only export if top_issue is open
+        if (issueState === "closed") {
+          closedUngroupedThreads.push(thread);
+          continue;
+        }
+      }
+      
+      // Check if thread appears resolved based on conversation content
+      let isResolved = false;
+      if (discordCache) {
+        try {
+          const { getThreadMessages } = await import("../storage/cache/discordCache.js");
+          const threadMessages = getThreadMessages(discordCache, thread.thread_id);
+          
+          if (threadMessages && threadMessages.length > 0) {
+            // First try quick pattern matching for obvious resolution signals
+            if (hasObviousResolutionSignals(threadMessages)) {
+              isResolved = true;
+            } else {
+              // If no obvious signals, use LLM to analyze the conversation
+              const llmResult = await isThreadResolvedWithLLM(threadMessages);
+              if (llmResult === true) {
+                isResolved = true;
+              }
+              // If llmResult is null (LLM failed), continue (don't filter out - err on side of exporting)
+            }
+          }
+        } catch (error) {
+          // If we can't check messages, continue (don't filter out)
+          logError(`Error checking resolution status for thread ${thread.thread_id}:`, error);
+        }
+      }
+      
+      if (isResolved) {
+        resolvedUngroupedThreads.push(thread);
+        continue;
+      }
+      
+      // No top_issue and not resolved - export it (unresolved discussion)
+      ungroupedThreads.push(thread);
+    }
+    
+    log(`Preparing ${ungroupedThreads.length} ungrouped threads for export (filtered from ${allUngroupedThreads.length} total)...`);
+    
+    // Save closed/resolved ungrouped threads resolution status to database (batch update)
+    if (closedUngroupedThreads.length > 0 || resolvedUngroupedThreads.length > 0) {
+      try {
+        const { prisma } = await import("../storage/db/prisma.js");
+        const resolvedAt = new Date();
+        const updates: Promise<any>[] = [];
+        
+        // Update closed threads
+        for (const thread of closedUngroupedThreads) {
+          updates.push(
+            prisma.ungroupedThread.update({
+              where: { threadId: thread.thread_id },
+              data: {
+                resolutionStatus: "closed_issue",
+                resolvedAt,
+              },
+            }).catch(error => {
+              logError(`Error saving resolution status for thread ${thread.thread_id}:`, error);
+              return null;
+            })
+          );
+        }
+        
+        // Update resolved threads
+        for (const thread of resolvedUngroupedThreads) {
+          updates.push(
+            prisma.ungroupedThread.update({
+              where: { threadId: thread.thread_id },
+              data: {
+                resolutionStatus: "conversation_resolved",
+                resolvedAt,
+              },
+            }).catch(error => {
+              logError(`Error saving resolution status for thread ${thread.thread_id}:`, error);
+              return null;
+            })
+          );
+        }
+        
+        await Promise.all(updates);
+        log(`Saved resolution status for ${closedUngroupedThreads.length} closed and ${resolvedUngroupedThreads.length} resolved ungrouped threads to database`);
+      } catch (error) {
+        logError("Error saving ungrouped threads resolution status to database:", error);
+      }
+    }
     
     for (const ungroupedThread of ungroupedThreads) {
       // Generate title for ungrouped thread
@@ -536,6 +716,17 @@ export async function exportGroupingToPMTool(
     // STEP 3: Export ungrouped issues (GitHub issues that don't match any thread)
     log(`Finding ungrouped GitHub issues (issues not matched to any thread)...`);
     const ungroupedIssues: PMToolIssue[] = [];
+    // Collect closed ungrouped issues for statistics tracking (declared outside try block for scope)
+    const closedUngroupedIssues: Array<{
+      number: number;
+      title: string;
+      url?: string;
+      state: string;
+      body?: string;
+      labels?: string[];
+      author?: string;
+      created_at?: string;
+    }> = [];
     
     try {
       // Get all GitHub issues from database
@@ -571,8 +762,10 @@ export async function exportGroupingToPMTool(
         // Find issues in cache that are NOT matched to any thread
         // These are our ungrouped issues
         // Only export open issues (unresolved)
+        // Also collect closed ungrouped issues for statistics tracking
         for (const issue of allCachedIssues) {
-          if (!matchedIssueNumbers.has(issue.number) && issue.state === "open") {
+          if (!matchedIssueNumbers.has(issue.number)) {
+            if (issue.state === "open") {
             // This issue doesn't have any thread matches - it's ungrouped
             const issueTitle = issue.title || `GitHub Issue #${issue.number}`;
             const title = `[Ungrouped Issue] ${issueTitle}`;
@@ -708,10 +901,23 @@ export async function exportGroupingToPMTool(
               logError(`Error saving ungrouped issue ${issue.number} to database:`, dbError);
               // Continue even if database save fails
             }
+            } else if (issue.state === "closed") {
+              // Collect closed ungrouped issues for statistics
+              closedUngroupedIssues.push({
+                number: issue.number,
+                title: issue.title || `GitHub Issue #${issue.number}`,
+                url: issue.url,
+                state: issue.state,
+                body: issue.body,
+                labels: issue.labels,
+                author: issue.author,
+                created_at: issue.created_at,
+              });
+            }
           }
         }
         
-        log(`Found ${ungroupedIssues.length} ungrouped GitHub issues`);
+        log(`Found ${ungroupedIssues.length} ungrouped GitHub issues (${closedUngroupedIssues.length} closed)`);
       }
     } catch (error) {
       logError("Error finding ungrouped issues:", error);
@@ -720,6 +926,66 @@ export async function exportGroupingToPMTool(
     
     // Add ungrouped issues to export list
     pmIssues.push(...ungroupedIssues);
+    
+    // Save closed items to a statistics file
+    const closedItemsData = {
+      timestamp: new Date().toISOString(),
+      channel_id: groupingData.channel_id,
+      counts: {
+        groups: closedGroups.length,
+        ungrouped_threads: closedUngroupedThreads.length + resolvedUngroupedThreads.length,
+        ungrouped_threads_closed: closedUngroupedThreads.length,
+        ungrouped_threads_resolved: resolvedUngroupedThreads.length,
+        ungrouped_issues: closedUngroupedIssues.length,
+      },
+      closed_groups: closedGroups.map(group => ({
+        id: group.id,
+        suggested_title: group.suggested_title,
+        github_issue: group.github_issue,
+        thread_count: group.threads?.length || 0,
+        affects_features: group.affects_features || [],
+      })),
+      closed_ungrouped_threads: closedUngroupedThreads.map(thread => ({
+        thread_id: thread.thread_id,
+        thread_name: thread.thread_name,
+        url: thread.url,
+        top_issue: thread.top_issue,
+        reason: thread.reason,
+        affects_features: thread.affects_features || [],
+        resolution_reason: "closed_issue",
+      })),
+      resolved_ungrouped_threads: resolvedUngroupedThreads.map(thread => ({
+        thread_id: thread.thread_id,
+        thread_name: thread.thread_name,
+        url: thread.url,
+        top_issue: thread.top_issue,
+        reason: thread.reason,
+        affects_features: thread.affects_features || [],
+        resolution_reason: "conversation_resolved",
+      })),
+      closed_ungrouped_issues: closedUngroupedIssues,
+    };
+    
+    let closedItemsFilePath: string | undefined;
+    try {
+      const { writeFile, mkdir } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+      const config = getConfig();
+      const closedItemsDir = join(process.cwd(), config.paths.cacheDir);
+      
+      // Ensure directory exists
+      if (!existsSync(closedItemsDir)) {
+        await mkdir(closedItemsDir, { recursive: true });
+      }
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").split("T")[0];
+      closedItemsFilePath = join(closedItemsDir, `closed-items-${timestamp}.json`);
+      await writeFile(closedItemsFilePath, JSON.stringify(closedItemsData, null, 2), "utf-8");
+      log(`Saved ${closedGroups.length} closed groups, ${closedUngroupedThreads.length} closed ungrouped threads, ${resolvedUngroupedThreads.length} resolved ungrouped threads, and ${closedUngroupedIssues.length} closed ungrouped issues to ${closedItemsFilePath}`);
+    } catch (error) {
+      logError("Error saving closed items statistics file:", error);
+      // Continue even if file save fails
+    }
     
     // Export to PM tool
     log(`Exporting ${pmIssues.length} issues to ${pmToolConfig.type} (${groupsWithFeatures.length} groups, ${ungroupedThreads.length} ungrouped threads, ${ungroupedIssues.length} ungrouped issues)...`);
@@ -952,6 +1218,14 @@ export async function exportGroupingToPMTool(
         issue_number,
         ...issue_info,
       })),
+      closed_items_count: {
+        groups: closedGroups.length,
+        ungrouped_threads: closedUngroupedThreads.length + resolvedUngroupedThreads.length,
+        ungrouped_threads_closed: closedUngroupedThreads.length,
+        ungrouped_threads_resolved: resolvedUngroupedThreads.length,
+        ungrouped_issues: closedUngroupedIssues.length,
+      },
+      closed_items_file: closedItemsFilePath,
     };
   } catch (error) {
     logError("Grouping export failed:", error);
@@ -959,6 +1233,126 @@ export async function exportGroupingToPMTool(
     result.errors = result.errors || [];
     result.errors.push(error instanceof Error ? error.message : String(error));
     return result;
+  }
+}
+
+/**
+ * Check if a thread appears resolved based on the last few messages using pattern matching
+ * Looks for resolution signals like "thank you", "got it", "resolved", etc.
+ * @param messages Discord messages from the thread
+ */
+function hasObviousResolutionSignals(messages: Array<{ content: string }>): boolean {
+  if (!messages || messages.length === 0) {
+    return false;
+  }
+  
+  // Check the last 3-5 messages for resolution signals
+  const lastMessages = messages.slice(-5);
+  const lastMessagesText = lastMessages
+    .map(m => m.content.toLowerCase().trim())
+    .join(" ");
+  
+  // Common resolution patterns
+  const resolutionPatterns = [
+    /\b(thank you|thanks|thx|ty)\b/i,
+    /\b(got it|gotcha|understand|understood)\b/i,
+    /\b(resolved|fixed|done|sorted|solved)\b/i,
+    /\b(perfect|great|awesome|cool)\s*(thanks|thx|ty)?\b/i,
+    /\b(that's? (it|what|exactly) (i|we) (needed|wanted)|exactly (what|what i needed))\b/i,
+    /\b(all good|all set|works now|working now)\b/i,
+    /\b(no (more|further) (questions|issues|problems))\b/i,
+    /\b(i'?m (all set|good|done)|we'?re (all set|good|done))\b/i,
+  ];
+  
+  // Check if any resolution pattern matches
+  for (const pattern of resolutionPatterns) {
+    if (pattern.test(lastMessagesText)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Use LLM to analyze if a Discord thread conversation indicates the issue was resolved
+ * Analyzes Discord messages from the thread to determine if the discussion reached a resolution
+ * Returns true if resolved, false if not, or null if analysis failed
+ * @param messages Discord messages from the thread (DiscordMessage[] from discordCache)
+ */
+async function isThreadResolvedWithLLM(messages: Array<{ content: string; author: { username: string } }>): Promise<boolean | null> {
+  if (!messages || messages.length === 0) {
+    return false;
+  }
+  
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    log("OpenAI API key not available, skipping LLM-based resolution detection");
+    return null;
+  }
+  
+  // Get the last 10-15 messages for context (or all if fewer)
+  const messagesToAnalyze = messages.slice(-15);
+  const conversationText = messagesToAnalyze
+    .map(m => `${m.author.username}: ${m.content}`)
+    .join("\n\n");
+  
+  // Limit conversation text to reasonable size (about 2000 chars)
+  const conversationPreview = conversationText.length > 2000 
+    ? conversationText.substring(conversationText.length - 2000)
+    : conversationText;
+  
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are analyzing a Discord thread conversation to determine if the issue or question discussed has been resolved.
+
+A thread is considered RESOLVED if:
+- The original question/problem has been answered or solved
+- Participants express satisfaction (thanks, got it, works now, etc.)
+- The conversation naturally concludes with resolution
+- It was just a simple question that got answered
+
+A thread is NOT resolved if:
+- The question remains unanswered
+- There are still ongoing problems or errors
+- The conversation ends without clear resolution
+- The issue is deferred or postponed
+
+Respond with ONLY "RESOLVED" or "NOT_RESOLVED" (no other text).`
+          },
+          {
+            role: "user",
+            content: `Analyze this Discord thread conversation and determine if the issue is resolved:\n\n${conversationPreview}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 10,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      logError(`OpenAI API error for resolution detection: ${response.status} ${errorText}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase();
+    
+    return result === "RESOLVED";
+  } catch (error) {
+    logError("Error using LLM for resolution detection:", error);
+    return null;
   }
 }
 

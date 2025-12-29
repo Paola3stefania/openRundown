@@ -1502,14 +1502,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Check for missing issues
         const missingIssues = allIssueNumbers.filter(num => !dbIssueNumbers.has(num));
-        
-        // Check issues without comments
-        const issuesWithoutComments = dbIssues.filter(issue => {
-          // Check if issue has comments - we need to query the database directly for this
-          return false; // Will check via database query
-        });
-        
-        // Query database directly for detailed stats
+
+        // Query database directly for detailed stats (includes comments)
         const { prisma } = await import("../storage/db/prisma.js");
         const dbIssuesDetailed = await prisma.gitHubIssue.findMany({
           select: {
@@ -1522,17 +1516,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         
         const issuesWithoutCommentsDetailed = dbIssuesDetailed.filter(issue => {
-          const comments = issue.issueComments as any[];
-          return !comments || comments.length === 0;
+          const comments = issue.issueComments;
+          return !comments || !Array.isArray(comments) || comments.length === 0;
         });
-        
+
         const issuesWithoutBody = dbIssuesDetailed.filter(issue => !issue.issueBody || issue.issueBody.trim().length === 0);
-        
+
         const openIssues = dbIssuesDetailed.filter(i => i.issueState === "open").length;
         const closedIssues = dbIssuesDetailed.filter(i => i.issueState === "closed").length;
         const issuesWithComments = dbIssuesDetailed.filter(issue => {
-          const comments = issue.issueComments as any[];
-          return comments && comments.length > 0;
+          const comments = issue.issueComments;
+          return comments && Array.isArray(comments) && comments.length > 0;
         });
         
         // Completeness score

@@ -6,6 +6,22 @@ import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "./t
 import type { DocumentationContent } from "../export/documentationFetcher.js";
 import type { ProductFeature } from "../export/types.js";
 
+/**
+ * GitHub reactions object (from GitHub API)
+ */
+export interface GitHubReactions {
+  url?: string;
+  total_count: number;
+  "+1"?: number;
+  "-1"?: number;
+  laugh?: number;
+  hooray?: number;
+  confused?: number;
+  heart?: number;
+  rocket?: number;
+  eyes?: number;
+}
+
 export interface IStorage {
   // Channel operations
   upsertChannel(channelId: string, channelName?: string, guildId?: string): Promise<void>;
@@ -150,11 +166,11 @@ export interface IStorage {
       created_at: string;
       updated_at: string;
       html_url: string;
-      reactions?: any;
+      reactions?: GitHubReactions | null;
     }>;
     assignees?: Array<{ login: string; avatar_url: string }>;
     milestone?: { title: string; state: string } | null;
-    reactions?: any;
+    reactions?: GitHubReactions | null;
   }>): Promise<void>;
   getGitHubIssues(options?: {
     inGroup?: boolean;

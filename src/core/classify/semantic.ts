@@ -353,6 +353,9 @@ export async function createEmbeddings(
  */
 export async function createEmbedding(text: string, apiKey: string, retries = 3): Promise<Embedding> {
   const embeddings = await createEmbeddings([text], apiKey, retries);
+  if (embeddings.length === 0) {
+    throw new Error("Failed to create embedding: API returned empty result");
+  }
   return embeddings[0];
 }
 

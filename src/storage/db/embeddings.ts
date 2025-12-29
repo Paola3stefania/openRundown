@@ -1726,10 +1726,12 @@ export async function computeAndSaveIssueEmbeddings(
   const issuesToEmbed: Array<{ issueNumber: number; issueTitle: string; issueBody: string | null; issueLabels: string[]; content: string }> = [];
   for (const issue of allIssues) {
     // Extract comment texts from JSONB array
-    const comments = Array.isArray(issue.issueComments) 
-      ? issue.issueComments.map((c: any) => {
-          if (typeof c === 'object' && c !== null && 'body' in c) {
-            return `Comment by ${c.user?.login || 'unknown'}: ${c.body}`;
+    interface IssueComment { body?: string; user?: { login?: string } }
+    const comments = Array.isArray(issue.issueComments)
+      ? issue.issueComments.map((c: unknown) => {
+          const comment = c as IssueComment;
+          if (typeof comment === 'object' && comment !== null && 'body' in comment) {
+            return `Comment by ${comment.user?.login || 'unknown'}: ${comment.body}`;
           }
           return '';
         }).filter(Boolean)

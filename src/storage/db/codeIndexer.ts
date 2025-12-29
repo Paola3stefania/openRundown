@@ -11,6 +11,32 @@ import { log } from "../../mcp/logger.js";
 const prisma = new PrismaClient();
 
 /**
+ * Represents a code section (function, class, interface, etc.)
+ */
+interface CodeSection {
+  id: string;
+  sectionType: string;
+  sectionName: string;
+  sectionContent: string;
+  startLine: number | null;
+  endLine: number | null;
+  featureMappings?: Array<{
+    featureId: string;
+    similarity: number | string | { toNumber(): number };
+    matchType: string;
+    feature?: { id: string; name: string };
+  }>;
+}
+
+/**
+ * Represents a code file with its sections
+ */
+interface CodeFile {
+  id: string;
+  codeSections: CodeSection[];
+}
+
+/**
  * Get code context for a feature using lazy indexing
  * - Checks if code is already indexed for this feature
  * - If not, searches and indexes code
@@ -260,7 +286,7 @@ async function parseAndIndexCode(
   searchQuery: string,
   repositoryUrl: string,
   chunkSize: number = 100
-): Promise<Array<{ id: string; codeSections: any[] }>> {
+): Promise<CodeFile[]> {
   // Create or get code search
   const codeSearch = await prisma.codeSearch.upsert({
     where: { id: searchId },
@@ -278,7 +304,7 @@ async function parseAndIndexCode(
 
   // Parse code context (format: "File: path\ncontent...")
   const fileBlocks = codeContext.split(/\n\n(?=File:)/);
-  const codeFiles: Array<{ id: string; codeSections: any[] }> = [];
+  const codeFiles: CodeFile[] = [];
   
   let skippedFiles = 0;
   let processedFiles = 0;
@@ -335,14 +361,14 @@ async function parseAndIndexCode(
     // Clear tasks for this chunk
     const chunkFileTasks: FileEmbeddingTask[] = [];
     const chunkSectionTasks: SectionEmbeddingTask[] = [];
-    const chunkFileData: Array<{
+    interface ChunkFileData {
       fileId: string;
       filePath: string;
       fileName: string;
       fileContent: string;
       contentHash: string;
       language: string | null;
-      existingFile?: any;
+      existingFile?: { id: string; codeSections: Array<{ id: string; sectionName: string; startLine: number | null; embedding: unknown }> };
       sections: Array<{
         type: string;
         name: string;
@@ -350,7 +376,8 @@ async function parseAndIndexCode(
         startLine: number;
         endLine: number;
       }>;
-    }> = [];
+    }
+    const chunkFileData: ChunkFileData[] = [];
     
     // PHASE 1.1: Parse files in this chunk and collect embedding tasks
     // Track processed files to avoid duplicates within the same chunk
@@ -407,7 +434,18 @@ async function parseAndIndexCode(
           log(`[CodeIndexer] Skipping ${filePath} - already indexed and embedded (${existingFile.codeSections.length} sections)`);
           skippedFiles++;
           skippedSections += existingFile.codeSections.length;
-          codeFiles.push(existingFile as any);
+          // Convert Prisma result to CodeFile interface
+          codeFiles.push({
+            id: existingFile.id,
+            codeSections: existingFile.codeSections.map(s => ({
+              id: s.id,
+              sectionType: s.sectionType,
+              sectionName: s.sectionName,
+              sectionContent: s.sectionContent,
+              startLine: s.startLine,
+              endLine: s.endLine,
+            })),
+          });
           continue;
         }
         
@@ -767,7 +805,23 @@ async function parseAndIndexCode(
       });
       if (codeFile) {
         log(`[CodeIndexer] Reloaded file ${fileData.filePath} with ${codeFile.codeSections.length} sections`);
-        codeFiles.push(codeFile as any);
+        // Convert Prisma result to CodeFile interface
+        codeFiles.push({
+          id: codeFile.id,
+          codeSections: codeFile.codeSections.map(s => ({
+            id: s.id,
+            sectionType: s.sectionType,
+            sectionName: s.sectionName,
+            sectionContent: s.sectionContent,
+            startLine: s.startLine,
+            endLine: s.endLine,
+            featureMappings: s.featureMappings?.map(m => ({
+              featureId: m.featureId,
+              similarity: m.similarity,
+              matchType: m.matchType,
+            })),
+          })),
+        });
       } else {
         log(`[CodeIndexer] WARNING: Could not reload file ${fileData.filePath} (id: ${fileData.fileId}) from database`);
       }
@@ -897,7 +951,7 @@ function getLanguageFromPath(filePath: string): string | null {
  * Map code sections to feature using semantic similarity
  */
 async function mapCodeToFeature(
-  codeFiles: Array<{ codeSections: any[] }>,
+  codeFiles: CodeFile[],
   featureId: string,
   featureName: string
 ): Promise<void> {
@@ -1028,7 +1082,7 @@ function computeSimpleSimilarity(
 /**
  * Build code context string from code files
  */
-function buildCodeContext(codeFiles: Array<{ codeSections: any[] }>): string {
+function buildCodeContext(codeFiles: CodeFile[]): string {
   const contexts: string[] = [];
   
   for (const file of codeFiles) {

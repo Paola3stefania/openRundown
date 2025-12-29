@@ -3,7 +3,7 @@
  * Wraps existing file-based logic for classifications and groupings
  */
 
-import type { IStorage } from "../interface.js";
+import type { IStorage, GitHubReactions } from "../interface.js";
 import type { ClassifiedThread, Group, UngroupedThread, StorageStats } from "../types.js";
 import type { DocumentationContent } from "../../export/documentationFetcher.js";
 import type { ProductFeature } from "../../export/types.js";
@@ -1050,11 +1050,11 @@ export class JsonStorage implements IStorage {
       created_at: string;
       updated_at: string;
       html_url: string;
-      reactions?: any;
+      reactions?: GitHubReactions | null;
     }>;
     assignees?: Array<{ login: string; avatar_url: string }>;
     milestone?: { title: string; state: string } | null;
-    reactions?: any;
+    reactions?: GitHubReactions | null;
   }>): Promise<void> {
     // For JSON storage, GitHub issues are stored in the cache file
     // This method is a no-op as issues are saved via the cache file in fetch_github_issues

@@ -123,11 +123,11 @@ async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   maxRetries: number = 3,
   initialDelay: number = 1000,
-  retryableErrors: (error: any) => boolean = (error) => {
+  retryableErrors: (error: unknown) => boolean = (error) => {
     const errorMsg = error instanceof Error ? error.message : String(error);
     // Retry on network errors, 5xx errors, and rate limit errors (but not 403/429 which need token rotation)
-    return errorMsg.includes('fetch') || 
-           errorMsg.includes('ECONNRESET') || 
+    return errorMsg.includes('fetch') ||
+           errorMsg.includes('ECONNRESET') ||
            errorMsg.includes('ETIMEDOUT') ||
            errorMsg.includes('500') ||
            errorMsg.includes('502') ||
@@ -135,7 +135,7 @@ async function retryWithBackoff<T>(
            errorMsg.includes('504');
   }
 ): Promise<T> {
-  let lastError: any;
+  let lastError: unknown;
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {

@@ -39,6 +39,14 @@ export interface ExportWorkflowResult {
     url: string; // PM tool issue URL
     identifier?: string; // PM tool issue identifier (e.g., "LIN-123")
   }>;
+  closed_items_count?: {
+    groups: number;
+    ungrouped_threads: number;
+    ungrouped_threads_closed?: number;
+    ungrouped_threads_resolved?: number;
+    ungrouped_issues: number;
+  };
+  closed_items_file?: string; // Path to the closed items statistics file
 }
 
 /**
