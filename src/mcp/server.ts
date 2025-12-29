@@ -596,11 +596,9 @@ const tools: Tool[] = [
           description: "Optional: Override the configured GITHUB_REPO_URL. If not provided, uses the configured GITHUB_REPO_URL from environment.",
         },
         max_files: {
-          type: "number",
-          description: "Maximum number of files to index (default: 100). This limits the total number of files processed, not just the chunk size. Lower values process faster but may miss relevant code.",
-          default: 100,
-          minimum: 1,
-          maximum: 1000,
+          type: ["number", "null"],
+          description: "Maximum number of files to index per batch (default: null = process entire repository). If null, processes ALL files in the repository in chunks. If set, processes that many files total. Lower values process faster but may miss relevant code.",
+          default: null,
         },
         chunk_size: {
           type: "number",
@@ -1762,7 +1760,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         local_repo_path?: string;
         github_repo_url?: string;
         chunk_size?: number;
-        max_files?: number;
+        max_files?: number | null;
       };
 
       const { getConfig } = await import("../config/index.js");
@@ -1801,7 +1799,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       
       try {
         const chunkSize = chunk_size ?? 100;
-        const maxFiles = max_files ?? 100;
+        const maxFiles = max_files ?? null; // null = process entire repository in chunks
         const result = await indexCodeForAllFeatures(repositoryUrl || undefined, force, undefined, localRepoPath, chunkSize, maxFiles);
         
         // Get diagnostic info (use the same variables we already have)

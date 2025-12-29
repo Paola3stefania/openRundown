@@ -14,7 +14,7 @@ import { log } from "../../mcp/logger.js";
 export async function fetchLocalCodeContext(
   localRepoPath: string,
   searchQuery: string,
-  maxFiles: number = 20
+  maxFiles: number | null = null // null = return all files (will be processed in chunks)
 ): Promise<string> {
   try {
     // Resolve path (handles both absolute and relative paths)
@@ -35,7 +35,9 @@ export async function fetchLocalCodeContext(
     // Find all files first, then limit processing to maxFiles
     const scannedDirs = new Set<string>();
     // Use a high limit for discovery (10000) to find all files, but we'll limit processing later
-    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], 10000, scannedDirs);
+    // If maxFiles is null, discover all files (up to 10000 safety limit)
+    const discoveryLimit = maxFiles === null ? 10000 : Math.max(maxFiles * 10, 10000);
+    const allCodeFiles = await findAllCodeFiles(resolvedPath, "", [], discoveryLimit, scannedDirs);
     log(`[LocalCodeFetcher] Found ${allCodeFiles.length} code files in repository`);
     
     // Log scanned directories summary
@@ -60,7 +62,7 @@ export async function fetchLocalCodeContext(
     if (!apiKey) {
       log(`[LocalCodeFetcher] OPENAI_API_KEY not set, falling back to keyword matching`);
       // Fallback to keyword matching if no API key
-      const codeFiles = await findCodeFiles(resolvedPath, searchQuery, maxFiles);
+      const codeFiles = await findCodeFiles(resolvedPath, searchQuery, maxFiles || 100);
       return await readAndFormatFiles(codeFiles, resolvedPath);
     }
 
@@ -75,13 +77,19 @@ export async function fetchLocalCodeContext(
     const { getCodeFileEmbedding } = await import("../../storage/db/embeddings.js");
     const { createHash } = await import("crypto");
     
-    // Limit embedding computation to a reasonable number for ranking
-    // We'll compute embeddings for up to 500 files (or maxFiles * 5, whichever is larger)
-    // This gives us a good sample for ranking without being too expensive
-    const maxFilesForRanking = Math.max(maxFiles * 5, 500);
+    // Limit embedding computation for ranking
+    // If maxFiles is null, rank up to 5000 files (process entire repo in chunks)
+    // Otherwise, rank maxFiles * 5 or 500, whichever is larger
+    const maxFilesForRanking = maxFiles === null 
+      ? Math.min(5000, allCodeFiles.length) // Rank up to 5000 files for full repo processing
+      : Math.max(maxFiles * 5, 500);
     const filesToRank = allCodeFiles.slice(0, Math.min(allCodeFiles.length, maxFilesForRanking));
     
-    log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (then select top ${maxFiles})...`);
+    if (maxFiles === null) {
+      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (processing entire repository in chunks)...`);
+    } else {
+      log(`[LocalCodeFetcher] Found ${allCodeFiles.length} total files, will compute embeddings for ${filesToRank.length} files for ranking (then select top ${maxFiles})...`);
+    }
     log(`[LocalCodeFetcher] Checking database for existing file embeddings to reuse...`);
     
     // Read files and compute similarities
@@ -173,11 +181,18 @@ export async function fetchLocalCodeContext(
     
     log(`[LocalCodeFetcher] Embedding summary: reused ${reusedEmbeddings} from database, computed ${computedEmbeddings} new embeddings`);
 
-    // Sort by similarity and take top N
+    // Sort by similarity
     fileSimilarities.sort((a, b) => b.similarity - a.similarity);
-    const topFiles = fileSimilarities.slice(0, maxFiles);
     
-    log(`[LocalCodeFetcher] Selected top ${topFiles.length} files by semantic similarity from ${fileSimilarities.length} total files (similarity range: ${topFiles[topFiles.length - 1]?.similarity.toFixed(3)} - ${topFiles[0]?.similarity.toFixed(3)})`);
+    // If maxFiles is null, return all files (will be processed in chunks)
+    // Otherwise, return top N files
+    const topFiles = maxFiles ? fileSimilarities.slice(0, maxFiles) : fileSimilarities;
+    
+    if (maxFiles) {
+      log(`[LocalCodeFetcher] Selected top ${topFiles.length} files by semantic similarity from ${fileSimilarities.length} total files (similarity range: ${topFiles[topFiles.length - 1]?.similarity.toFixed(3)} - ${topFiles[0]?.similarity.toFixed(3)})`);
+    } else {
+      log(`[LocalCodeFetcher] Returning all ${topFiles.length} files ranked by semantic similarity (will be processed in chunks)`);
+    }
 
     // Format results
     const codeContexts = topFiles.map(file => 

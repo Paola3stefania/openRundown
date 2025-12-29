@@ -126,7 +126,7 @@ function buildSearchQuery(featureName: string, keywords: string[]): string {
  * Search for code and index it
  * This is called when we don't have code indexed for a feature yet
  * @param chunkSize Number of files to process per chunk (default: 100)
- * @param maxFiles Maximum number of files to fetch and index (default: 100). Limits total files, not just chunk size.
+ * @param maxFiles Maximum number of files to fetch per batch (default: null = process all files). If set, processes files in batches of this size until all files are processed.
  */
 export async function searchAndIndexCode(
   searchQuery: string,
@@ -135,7 +135,7 @@ export async function searchAndIndexCode(
   featureName: string,
   force: boolean = false,
   chunkSize: number = 100,
-  maxFiles: number = 100
+  maxFiles: number | null = null // null = process all files
 ): Promise<string> {
   try {
     // Check if we've searched for this query before
@@ -353,6 +353,9 @@ async function parseAndIndexCode(
     }> = [];
     
     // PHASE 1.1: Parse files in this chunk and collect embedding tasks
+    // Track processed files to avoid duplicates within the same chunk
+    const processedFilePaths = new Set<string>();
+    
     for (const block of chunk) {
       const lines = block.split("\n");
       if (lines.length < 2 || !lines[0].startsWith("File: ")) continue;
@@ -363,6 +366,13 @@ async function parseAndIndexCode(
       filePath = filePath.replace(/^\/+/, ""); // Remove leading slashes
       filePath = filePath.replace(/\\/g, "/"); // Normalize Windows separators to forward slashes
       filePath = filePath.replace(/\/+/g, "/"); // Remove duplicate slashes
+      
+      // Skip if we've already processed this file in this chunk
+      if (processedFilePaths.has(filePath)) {
+        log(`[CodeIndexer] Skipping duplicate file in chunk: ${filePath}`);
+        continue;
+      }
+      processedFilePaths.add(filePath);
       
       const fileName = filePath.split("/").pop() || filePath;
       const fileContent = lines.slice(1).join("\n");
@@ -412,18 +422,81 @@ async function parseAndIndexCode(
           });
         }
         
-        // Collect sections that need embeddings
-        for (const section of sectionsNeedingEmbeddings) {
-          chunkSectionTasks.push({
-            sectionId: section.id,
-            sectionText: `${section.sectionType}: ${section.sectionName}\n${section.sectionContent}`,
-            contentHash: section.contentHash,
-            fileId: existingFile.id,
-          });
+        // Parse sections from file content (even if file exists, sections might be missing)
+        const sections = parseCodeIntoSections(fileContent, filePath, language);
+        log(`[CodeIndexer] Parsed ${sections.length} sections from existing file ${filePath} (language: ${language || "unknown"})`);
+        
+        // Get existing sections for this file
+        const existingSectionsMap = new Map(
+          existingFile.codeSections.map(s => [
+            createHash("md5").update(`${existingFile.id}:${s.sectionName}:${s.startLine}`).digest("hex"),
+            s
+          ])
+        );
+        
+        // Process sections - create missing ones, update changed ones
+        for (const section of sections) {
+          const sectionId = createHash("md5")
+            .update(`${existingFile.id}:${section.name}:${section.startLine}`)
+            .digest("hex");
+          
+          const sectionHash = createHash("md5").update(section.content).digest("hex");
+          const existingSection = existingSectionsMap.get(sectionId);
+          
+          if (existingSection && existingSection.contentHash === sectionHash) {
+            // Section unchanged - check if embedding exists
+            if (existingSection.embedding) {
+              skippedSections++;
+            } else {
+              // Section exists but no embedding - add to tasks
+              chunkSectionTasks.push({
+                sectionId,
+                sectionText: `${section.type}: ${section.name}\n${section.content}`,
+                contentHash: sectionHash,
+                fileId: existingFile.id,
+              });
+            }
+          } else {
+            // Section new or changed - create/update it
+            await prisma.codeSection.upsert({
+              where: { id: sectionId },
+              create: {
+                id: sectionId,
+                codeFileId: existingFile.id,
+                sectionType: section.type,
+                sectionName: section.name,
+                sectionContent: section.content,
+                startLine: section.startLine,
+                endLine: section.endLine,
+                contentHash: sectionHash,
+              },
+              update: {
+                sectionContent: section.content,
+                contentHash: sectionHash,
+              },
+            });
+            log(`[CodeIndexer] Saved code section to database: ${section.name} (${section.type}) in ${filePath} (id: ${sectionId})`);
+            processedSections++; // Count section as processed
+            
+            // Delete old embedding if section changed
+            if (existingSection?.embedding) {
+              await prisma.codeSectionEmbedding.deleteMany({
+                where: { codeSectionId: sectionId },
+              });
+              log(`[CodeIndexer] Deleted old embedding for changed section ${section.name}`);
+            }
+            
+            // Add to section embedding tasks
+            chunkSectionTasks.push({
+              sectionId,
+              sectionText: `${section.type}: ${section.name}\n${section.content}`,
+              contentHash: sectionHash,
+              fileId: existingFile.id,
+            });
+          }
         }
         
         // Store file data for later processing
-        const sections = parseCodeIntoSections(fileContent, filePath, language);
         chunkFileData.push({
           fileId: existingFile.id,
           filePath,
@@ -450,6 +523,7 @@ async function parseAndIndexCode(
             contentHash,
           },
           update: {
+            codeSearchId: searchId, // Ensure codeSearchId is set on update too
             fileContent,
             contentHash,
             lastIndexedAt: new Date(),
@@ -478,6 +552,7 @@ async function parseAndIndexCode(
         
         // Parse into sections
         const sections = parseCodeIntoSections(fileContent, filePath, language);
+        log(`[CodeIndexer] Parsed ${sections.length} sections from new/changed file ${filePath} (language: ${language || "unknown"})`);
         
         // Get existing sections for this file
         const existingSections = await prisma.codeSection.findMany({
@@ -531,6 +606,7 @@ async function parseAndIndexCode(
               },
             });
             log(`[CodeIndexer] Saved code section to database: ${section.name} (${section.type}) in ${filePath} (id: ${sectionId})`);
+            processedSections++; // Count section as processed
             
             // Delete old embedding if section changed
             if (existingSection?.embedding) {
@@ -680,10 +756,20 @@ async function parseAndIndexCode(
     for (const fileData of chunkFileData) {
       const codeFile = await prisma.codeFile.findUnique({
         where: { id: fileData.fileId },
-        include: { codeSections: true },
+        include: { 
+          codeSections: {
+            include: {
+              embedding: true,
+              featureMappings: true,
+            },
+          },
+        },
       });
       if (codeFile) {
+        log(`[CodeIndexer] Reloaded file ${fileData.filePath} with ${codeFile.codeSections.length} sections`);
         codeFiles.push(codeFile as any);
+      } else {
+        log(`[CodeIndexer] WARNING: Could not reload file ${fileData.filePath} (id: ${fileData.fileId}) from database`);
       }
     }
     
@@ -1220,7 +1306,7 @@ export async function indexCodeForAllFeatures(
   onProgress?: (processed: number, total: number) => void,
   localRepoPathOverride?: string,
   chunkSize: number = 100,
-  maxFiles: number = 100
+  maxFiles: number | null = null // null = process all files in chunks
 ): Promise<{ indexed: number; matched: number; total: number }> {
   const { getConfig } = await import("../../config/index.js");
   const config = getConfig();
