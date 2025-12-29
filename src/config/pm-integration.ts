@@ -18,6 +18,7 @@ export interface FeatureExtractionConfig {
 export interface PMIntegrationConfig {
   enabled: boolean;
   documentation_urls?: string[];
+  github_repo_url?: string; // GitHub repository URL (e.g., https://github.com/better-auth/better-auth)
   feature_extraction?: FeatureExtractionConfig;
   pm_tool?: PMToolConfig;
 }
@@ -32,6 +33,7 @@ export function getPMIntegrationConfig(): PMIntegrationConfig {
           .map(url => url.endsWith(":") ? url.slice(0, -1) : url) // Remove trailing colons
           .filter(url => url.length > 0)
       : undefined,
+    github_repo_url: process.env.GITHUB_REPO_URL?.trim() || undefined,
     feature_extraction: {
       enabled: process.env.FEATURE_EXTRACTION_ENABLED !== "false",
       auto_update: process.env.FEATURE_AUTO_UPDATE === "true",

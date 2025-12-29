@@ -179,6 +179,12 @@ model GitHubIssue {
   issueCreatedAt       DateTime? @map("issue_created_at")
   issueUpdatedAt       DateTime? @map("issue_updated_at")
   
+  // Full conversation data
+  issueComments        Json     @default("[]") @map("issue_comments") // Array of comment objects
+  issueAssignees       String[] @map("issue_assignees") // Array of assignee usernames
+  issueMilestone       String?  @map("issue_milestone") // Milestone title
+  issueReactions       Json?    @map("issue_reactions") // Reactions object
+  
   // Group tracking
   inGroup              Boolean  @default(false) @map("in_group")
   groupId              String?  @map("group_id") // FK to groups table
@@ -204,6 +210,7 @@ model GitHubIssue {
   @@index([exportStatus])
   @@index([issueState])
   @@index([groupId])
+  @@index([issueAssignees], type: Gin)
   @@map("github_issues")
 }
 
@@ -311,6 +318,7 @@ model Feature {
   relatedKeywords     String[] @map("related_keywords")
   documentationSection String? @map("documentation_section")
   documentationUrls   String[] @map("documentation_urls")
+  codeContext         String?  @db.Text @map("code_context")
   extractedAt         DateTime @default(now()) @map("extracted_at")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")

@@ -1043,6 +1043,18 @@ export class JsonStorage implements IStorage {
     author?: string;
     created_at?: string;
     updated_at?: string;
+    comments?: Array<{
+      id: number;
+      body: string;
+      user: { login: string; avatar_url: string };
+      created_at: string;
+      updated_at: string;
+      html_url: string;
+      reactions?: any;
+    }>;
+    assignees?: Array<{ login: string; avatar_url: string }>;
+    milestone?: { title: string; state: string } | null;
+    reactions?: any;
   }>): Promise<void> {
     // For JSON storage, GitHub issues are stored in the cache file
     // This method is a no-op as issues are saved via the cache file in fetch_github_issues

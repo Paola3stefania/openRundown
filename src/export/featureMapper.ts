@@ -63,6 +63,7 @@ type Embedding = number[];
 /**
  * Get or compute embeddings for all features (shared helper)
  * Returns a Map of feature ID to embedding
+ * Always tries to use database embeddings first when database is available
  */
 async function getOrComputeFeatureEmbeddings(
   features: Feature[],
@@ -71,28 +72,36 @@ async function getOrComputeFeatureEmbeddings(
   const featureEmbeddings = new Map<string, Embedding>();
   const featuresToEmbed: Array<{ feature: Feature; featureText: string }> = [];
   
+  // Check if database is available before attempting to retrieve embeddings
+  const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+  const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+  
   for (const feature of features) {
     // Try to get from database first (if database is available)
     let embedding: Embedding | null = null;
-    try {
-      embedding = await getFeatureEmbedding(feature.id);
-    } catch (error) {
-      // Database not available or error - will compute on-demand
-      // This is expected when using JSON storage backend
+    if (useDatabase) {
+      try {
+        embedding = await getFeatureEmbedding(feature.id);
+        if (embedding) {
+          featureEmbeddings.set(feature.id, embedding);
+          continue; // Successfully retrieved from database, skip to next feature
+        }
+      } catch (error) {
+        // Database error - log but continue to compute on-demand
+        log(`[Feature Embedding] Could not retrieve embedding for feature ${feature.id} from DB: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     
-    if (!embedding) {
-      // Need to compute
-      const name = feature.name.trim();
-      const separator = name.endsWith(":") ? " " : ": ";
-      const keywords = (feature.related_keywords || []).length > 0 
-        ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
-        : "";
-      const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
-      featuresToEmbed.push({ feature, featureText });
-    } else {
-      featureEmbeddings.set(feature.id, embedding);
-    }
+    // Need to compute embedding (either database not available or embedding not found)
+    // Note: On-demand computation won't include issue context (that's only in computeAndSaveFeatureEmbeddings)
+    // This is fine for now - embeddings will be recomputed with issue context when computeAndSaveFeatureEmbeddings runs
+    const name = feature.name.trim();
+    const separator = name.endsWith(":") ? " " : ": ";
+    const keywords = (feature.related_keywords || []).length > 0 
+      ? ` Keywords: ${(feature.related_keywords || []).join(", ")}` 
+      : "";
+    const featureText = `${name}${feature.description ? `${separator}${feature.description}` : ""}${keywords}`;
+    featuresToEmbed.push({ feature, featureText });
   }
   
   // Batch compute embeddings for features that need them
@@ -212,6 +221,13 @@ export async function mapGroupsToFeatures(
 
   // Step 1: Get or compute embeddings for all features
   const featureEmbeddings = await getOrComputeFeatureEmbeddings(features, apiKey);
+  
+  // Debug: Verify embeddings were loaded
+  log(`[DEBUG] Loaded ${featureEmbeddings.size} feature embeddings out of ${features.length} features`);
+  if (featureEmbeddings.size < features.length) {
+    const missingFeatures = features.filter(f => !featureEmbeddings.has(f.id));
+    log(`[DEBUG] Missing embeddings for features: ${missingFeatures.map(f => f.name).join(", ")}`);
+  }
 
   // Step 2: Map each group to features
   const mappedGroups: GroupingGroup[] = [];
@@ -268,22 +284,78 @@ export async function mapGroupsToFeatures(
       continue;
     }
     
-    // Find matching features
-    const affectedFeatures: Array<{ id: string; similarity: number }> = [];
+    // Find matching features using both semantic similarity and keyword matching
+    const affectedFeatures: Array<{ id: string; similarity: number; ruleBased?: boolean }> = [];
+    const allSimilarities: Array<{ id: string; name: string; similarity: number }> = [];
+    
+    // Build searchable text from group (for keyword matching)
+    const groupSearchText = groupText.toLowerCase();
+    const issueTitle = group.github_issue?.title?.toLowerCase() || "";
+    const issueLabelsArray = group.github_issue?.labels || [];
+    const issueLabels = issueLabelsArray.map((l: string | { name: string }) => {
+      if (typeof l === 'string') return l.toLowerCase();
+      if (typeof l === 'object' && l !== null && 'name' in l) return l.name.toLowerCase();
+      return "";
+    }).filter(Boolean).join(" ");
+    const allSearchText = `${groupSearchText} ${issueTitle} ${issueLabels}`.toLowerCase();
     
     for (const feature of features) {
       const featureEmb = featureEmbeddings.get(feature.id);
-      if (!featureEmb) continue;
+      let similarity = 0;
+      let ruleBasedMatch = false;
       
-      const similarity = cosineSimilarity(groupEmbedding, featureEmb);
+      // Rule-based matching: Check if feature name or keywords appear in group/issue text
+      const featureNameLower = feature.name.toLowerCase();
+      const featureKeywords = (feature.related_keywords || []).map(k => k.toLowerCase());
       
-      if (similarity >= minSimilarity) {
-        affectedFeatures.push({ id: feature.id, similarity });
+      // Check if feature name appears in group/issue text
+      if (allSearchText.includes(featureNameLower)) {
+        ruleBasedMatch = true;
+        similarity = 0.9; // High confidence for exact name match
+        log(`[DEBUG] Group ${group.id}: Rule-based match - feature name "${feature.name}" found in group/issue text`);
+      } else {
+        // Check if any keywords match
+        for (const keyword of featureKeywords) {
+          if (keyword.length > 2 && allSearchText.includes(keyword)) {
+            ruleBasedMatch = true;
+            similarity = 0.8; // High confidence for keyword match
+            log(`[DEBUG] Group ${group.id}: Rule-based match - keyword "${keyword}" found in group/issue text`);
+            break;
+          }
+        }
+      }
+      
+      // If no rule-based match, use semantic similarity
+      if (!ruleBasedMatch && featureEmb) {
+        similarity = cosineSimilarity(groupEmbedding, featureEmb);
+        allSimilarities.push({ id: feature.id, name: feature.name, similarity });
+      } else if (ruleBasedMatch) {
+        // Include rule-based matches in allSimilarities for debugging
+        allSimilarities.push({ id: feature.id, name: feature.name, similarity });
+      } else {
+        log(`[DEBUG] Group ${group.id}: Feature ${feature.id} has no embedding, skipping`);
+        continue;
+      }
+      
+      // Add to affected features if above threshold OR if rule-based match
+      if (similarity >= minSimilarity || ruleBasedMatch) {
+        affectedFeatures.push({ id: feature.id, similarity, ruleBased: ruleBasedMatch });
       }
     }
     
-    // Sort by similarity and take top matches
-    affectedFeatures.sort((a, b) => b.similarity - a.similarity);
+    // Debug: Show top similarities even if below threshold
+    allSimilarities.sort((a, b) => b.similarity - a.similarity);
+    const top5All = allSimilarities.slice(0, 5);
+    log(`[DEBUG] Group ${group.id} top 5 similarities (threshold=${minSimilarity}): ${top5All.map(f => `${f.name}:${f.similarity.toFixed(3)}`).join(", ")}`);
+    
+    // Sort by similarity (rule-based matches first, then by score) and take top matches
+    affectedFeatures.sort((a, b) => {
+      // Rule-based matches first
+      if (a.ruleBased && !b.ruleBased) return -1;
+      if (!a.ruleBased && b.ruleBased) return 1;
+      // Then by similarity score
+      return b.similarity - a.similarity;
+    });
     const topFeatures = affectedFeatures.slice(0, 5);
     
     // Map to feature objects
@@ -297,6 +369,25 @@ export async function mapGroupsToFeatures(
         })
       : [{ id: "general", name: "General" }];
     
+    // Log rule-based matches for debugging
+    const ruleBasedCount = topFeatures.filter(f => f.ruleBased).length;
+    if (ruleBasedCount > 0) {
+      log(`[DEBUG] Group ${group.id}: ${ruleBasedCount} rule-based match(es) found`);
+    }
+    
+    // Debug logging
+    if (topFeatures.length === 0) {
+      log(`[DEBUG] Group ${group.id} matched to General (no features above threshold ${minSimilarity})`);
+    } else {
+      const ruleBasedMatches = topFeatures.filter(f => f.ruleBased).map(f => f.id);
+      const semanticMatches = topFeatures.filter(f => !f.ruleBased).map(f => f.id);
+      log(`[DEBUG] Group ${group.id} matched to ${affectsFeatures.length} features: ${affectsFeatures.map(f => f.name).join(", ")}`);
+      if (ruleBasedMatches.length > 0) {
+        log(`[DEBUG] Group ${group.id} rule-based matches: ${ruleBasedMatches.join(", ")}`);
+      }
+      log(`[DEBUG] Group ${group.id} top similarities: ${topFeatures.map(f => `${f.id}:${f.similarity.toFixed(3)}${f.ruleBased ? " (rule-based)" : ""}`).join(", ")}`);
+    }
+    
     mappedGroups.push({
       ...group,
       affects_features: affectsFeatures,
@@ -305,6 +396,13 @@ export async function mapGroupsToFeatures(
   }
   
   log(`Mapped ${groups.length} groups to features. ${mappedGroups.filter(g => g.is_cross_cutting).length} cross-cutting groups.`);
+  
+  // Debug: Log summary of matches
+  const groupsWithMatches = mappedGroups.filter(g => 
+    g.affects_features && g.affects_features.length > 0 && 
+    !(g.affects_features.length === 1 && g.affects_features[0].id === "general")
+  );
+  log(`[DEBUG] ${groupsWithMatches.length} out of ${mappedGroups.length} groups matched to specific features (not General)`);
   
   return mappedGroups;
 }

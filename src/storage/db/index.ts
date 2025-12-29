@@ -354,7 +354,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async saveGroups(groups: Group[]): Promise<void> {
-    if (groups.length === 0) return;
+    if (groups.length === 0) {
+      console.error(`[DEBUG saveGroups] No groups to save`);
+      return;
+    }
+
+    console.error(`[DEBUG saveGroups] Saving ${groups.length} groups to database`);
+    
+    // Debug: Check first group
+    const firstGroup = groups[0];
+    console.error(`[DEBUG saveGroups] First group: id=${firstGroup.id}, affects_features=${JSON.stringify(firstGroup.affects_features)}, is_cross_cutting=${firstGroup.is_cross_cutting}`);
 
     // Process groups in batches to avoid transaction timeout
     // Batch size of 20 groups should keep each transaction under 30 seconds
@@ -365,65 +374,111 @@ export class DatabaseStorage implements IStorage {
       batches.push(groups.slice(i, i + BATCH_SIZE));
     }
 
+    console.error(`[DEBUG saveGroups] Processing ${batches.length} batches`);
+
     // Process each batch in a separate transaction with increased timeout
-    for (const batch of batches) {
-      await prisma.$transaction(async (tx) => {
-        for (const group of batch) {
-          // Upsert group
-          await tx.group.upsert({
-            where: { id: group.id },
-            update: {
-              suggestedTitle: group.suggested_title,
-              avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
-              threadCount: group.thread_count,
-              isCrossCutting: group.is_cross_cutting,
-              status: group.status,
-              exportedAt: group.exported_at ? new Date(group.exported_at) : null,
-              linearIssueId: group.linear_issue_id ?? null,
-              linearIssueUrl: group.linear_issue_url ?? null,
-              linearIssueIdentifier: group.linear_issue_identifier ?? null,
-              linearProjectIds: group.linear_project_ids ?? [],
-              affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
-            },
-            create: {
-              id: group.id,
-              channelId: group.channel_id,
-              githubIssueNumber: group.github_issue_number ?? null,
-              suggestedTitle: group.suggested_title,
-              avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
-              threadCount: group.thread_count,
-              isCrossCutting: group.is_cross_cutting,
-              status: group.status,
-              exportedAt: group.exported_at ? new Date(group.exported_at) : null,
-              linearIssueId: group.linear_issue_id ?? null,
-              linearIssueUrl: group.linear_issue_url ?? null,
-              linearIssueIdentifier: group.linear_issue_identifier ?? null,
-              linearProjectIds: group.linear_project_ids ?? [],
-              affectsFeatures: group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [],
-            },
-          });
-
-          // Delete existing group-thread relationships
-          await tx.groupThread.deleteMany({
-            where: { groupId: group.id },
-          });
-
-          // Insert group-thread relationships
-          if (group.threads.length > 0) {
-            await tx.groupThread.createMany({
-              data: group.threads.map((thread) => ({
-                groupId: group.id,
-                threadId: thread.thread_id,
-                similarityScore: thread.similarity_score ? new Decimal(thread.similarity_score) : null,
-              })),
-              skipDuplicates: true,
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      console.error(`[DEBUG saveGroups] Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} groups`);
+      
+      try {
+        await prisma.$transaction(async (tx) => {
+          // Process all groups in the batch in parallel for better performance
+          await Promise.all(batch.map(async (group) => {
+            const affectsFeaturesData = group.affects_features ? JSON.parse(JSON.stringify(group.affects_features)) : [];
+            console.error(`[DEBUG saveGroups] Upserting group ${group.id} with affectsFeatures=${JSON.stringify(affectsFeaturesData)}`);
+            
+            // Upsert group
+            const upsertedGroup = await tx.group.upsert({
+              where: { id: group.id },
+              update: {
+                suggestedTitle: group.suggested_title,
+                avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
+                threadCount: group.thread_count,
+                isCrossCutting: group.is_cross_cutting,
+                status: group.status,
+                exportedAt: group.exported_at ? new Date(group.exported_at) : null,
+                linearIssueId: group.linear_issue_id ?? null,
+                linearIssueUrl: group.linear_issue_url ?? null,
+                linearIssueIdentifier: group.linear_issue_identifier ?? null,
+                linearProjectIds: group.linear_project_ids ?? [],
+                affectsFeatures: affectsFeaturesData,
+              },
+              create: {
+                id: group.id,
+                channelId: group.channel_id,
+                githubIssueNumber: group.github_issue_number ?? null,
+                suggestedTitle: group.suggested_title,
+                avgSimilarity: group.avg_similarity ? new Decimal(group.avg_similarity) : null,
+                threadCount: group.thread_count,
+                isCrossCutting: group.is_cross_cutting,
+                status: group.status,
+                exportedAt: group.exported_at ? new Date(group.exported_at) : null,
+                linearIssueId: group.linear_issue_id ?? null,
+                linearIssueUrl: group.linear_issue_url ?? null,
+                linearIssueIdentifier: group.linear_issue_identifier ?? null,
+                linearProjectIds: group.linear_project_ids ?? [],
+                affectsFeatures: affectsFeaturesData,
+              },
             });
+            
+            console.error(`[DEBUG saveGroups] Upserted group ${group.id}, affectsFeatures in DB: ${JSON.stringify(upsertedGroup.affectsFeatures)}`);
+
+            // Delete existing group-thread relationships
+            await tx.groupThread.deleteMany({
+              where: { groupId: group.id },
+            });
+
+            // Insert group-thread relationships
+            if (group.threads.length > 0) {
+              await tx.groupThread.createMany({
+                data: group.threads.map((thread) => ({
+                  groupId: group.id,
+                  threadId: thread.thread_id,
+                  similarityScore: thread.similarity_score ? new Decimal(thread.similarity_score) : null,
+                })),
+                skipDuplicates: true,
+              });
+            }
+          }));
+          
+          console.error(`[DEBUG saveGroups] Transaction for batch ${batchIndex + 1} completed successfully`);
+        }, {
+          timeout: 30000, // 30 seconds timeout per batch
+        });
+        
+        // Verify a sample group from this batch was saved correctly (after transaction commits)
+        if (batch.length > 0) {
+          const sampleGroupId = batch[0].id;
+          try {
+            // Wait a tiny bit to ensure transaction is committed
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const savedGroup = await prisma.group.findUnique({
+              where: { id: sampleGroupId },
+              select: { id: true, affectsFeatures: true, isCrossCutting: true },
+            });
+            console.error(`[DEBUG saveGroups] Verified batch ${batchIndex + 1} sample group ${savedGroup?.id}: affectsFeatures=${JSON.stringify(savedGroup?.affectsFeatures)}, isCrossCutting=${savedGroup?.isCrossCutting}`);
+            
+            if (!savedGroup) {
+              console.error(`[DEBUG saveGroups] ERROR: Sample group ${sampleGroupId} not found in database after save!`);
+            } else if (JSON.stringify(savedGroup.affectsFeatures) !== JSON.stringify(batch[0].affects_features)) {
+              console.error(`[DEBUG saveGroups] WARNING: Sample group ${sampleGroupId} affectsFeatures mismatch! Expected: ${JSON.stringify(batch[0].affects_features)}, Got: ${JSON.stringify(savedGroup.affectsFeatures)}`);
+            }
+          } catch (verifyError) {
+            console.error(`[DEBUG saveGroups] Could not verify sample group: ${verifyError instanceof Error ? verifyError.message : String(verifyError)}`);
           }
         }
-      }, {
-        timeout: 30000, // 30 seconds timeout per batch
-      });
+        
+        console.error(`[DEBUG saveGroups] Completed batch ${batchIndex + 1}/${batches.length}`);
+      } catch (batchError) {
+        console.error(`[DEBUG saveGroups] ERROR: Failed to save batch ${batchIndex + 1}: ${batchError instanceof Error ? batchError.message : String(batchError)}`);
+        console.error(`[DEBUG saveGroups] Error stack: ${batchError instanceof Error ? batchError.stack : 'N/A'}`);
+        // Continue with next batch instead of failing completely
+        throw batchError; // Re-throw to stop processing if critical
+      }
     }
+    
+    console.error(`[DEBUG saveGroups] Successfully saved all ${groups.length} groups to database`);
   }
 
   async getGroups(channelId: string, options?: { status?: "pending" | "exported" }): Promise<Group[]> {
@@ -954,6 +1009,18 @@ export class DatabaseStorage implements IStorage {
     author?: string;
     created_at?: string;
     updated_at?: string;
+    comments?: Array<{
+      id: number;
+      body: string;
+      user: { login: string; avatar_url: string };
+      created_at: string;
+      updated_at: string;
+      html_url: string;
+      reactions?: any;
+    }>;
+    assignees?: Array<{ login: string; avatar_url: string }>;
+    milestone?: { title: string; state: string } | null;
+    reactions?: any;
   }>): Promise<void> {
     if (issues.length === 0) return;
 
@@ -970,6 +1037,10 @@ export class DatabaseStorage implements IStorage {
             issueAuthor: issue.author ?? null,
             issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
             issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+            issueComments: issue.comments ? (issue.comments as any) : [],
+            issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
+            issueMilestone: issue.milestone?.title ?? null,
+            issueReactions: issue.reactions ? (issue.reactions as any) : null,
           },
           create: {
             issueNumber: issue.number,
@@ -981,6 +1052,10 @@ export class DatabaseStorage implements IStorage {
             issueAuthor: issue.author ?? null,
             issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
             issueUpdatedAt: issue.updated_at ? new Date(issue.updated_at) : null,
+            issueComments: issue.comments ? (issue.comments as any) : [],
+            issueAssignees: issue.assignees ? issue.assignees.map(a => a.login) : [],
+            issueMilestone: issue.milestone?.title ?? null,
+            issueReactions: issue.reactions ? (issue.reactions as any) : null,
           },
         });
       }

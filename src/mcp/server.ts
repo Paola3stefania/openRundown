@@ -500,6 +500,21 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "compute_feature_embeddings",
+    description: "Compute and update embeddings for product features. This includes documentation context, related GitHub issues, Discord conversations, and code context from the repository (if GITHUB_REPO_URL is configured). Only computes embeddings for features that don't have embeddings or have changed content. Set force=true to recompute all embeddings. Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        force: {
+          type: "boolean",
+          description: "Force recomputation of all feature embeddings, even if they already exist. Useful when you've added new context sources (e.g., GitHub issues, Discord conversations).",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "manage_documentation_cache",
     description: "Manage documentation cache - view cached docs, pre-fetch and cache documentation, extract features from cache, or clear cache. This avoids re-fetching documentation every time features are needed.",
     inputSchema: {
@@ -879,19 +894,36 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const cachePath = join(process.cwd(), githubConfig.paths.cacheDir, githubConfig.paths.issuesCacheFile);
 
       try {
-        // Check if cache exists
+        console.error(`[GitHub Issues] Starting fetch_github_issues...`);
+        console.error(`[GitHub Issues] Parameters: incremental=${incremental}, limit=${limit ?? 'none'}`);
+        
+        // Check if cache exists (for both incremental updates and resume capability)
         let existingCache: IssuesCache | null = null;
         let sinceDate: string | undefined = undefined;
 
-        if (incremental) {
-          try {
-            if (existsSync(cachePath)) {
-              existingCache = await loadIssuesFromCache(cachePath);
+        try {
+          if (existsSync(cachePath)) {
+            console.error(`[GitHub Issues] Found existing cache at ${cachePath}`);
+            existingCache = await loadIssuesFromCache(cachePath);
+            
+            if (incremental) {
               sinceDate = getMostRecentIssueDate(existingCache);
+              console.error(`[GitHub Issues] Incremental mode: fetching issues updated since ${sinceDate}`);
+              console.error(`[GitHub Issues] Existing cache has ${existingCache.issues.length} issues`);
+            } else {
+              console.error(`[GitHub Issues] Full fetch mode: will resume from existing cache (${existingCache.issues.length} issues)`);
+              console.error(`[GitHub Issues] Already-fetched issues will be skipped, only missing issues will be fetched`);
             }
-          } catch (error) {
-            // Cache doesn't exist or invalid, will fetch all
+          } else {
+            if (incremental) {
+              console.error(`[GitHub Issues] No existing cache found, will fetch all issues`);
+            } else {
+              console.error(`[GitHub Issues] No existing cache found, will fetch all issues from scratch`);
+            }
           }
+        } catch (error) {
+          console.error(`[GitHub Issues] Cache exists but invalid, will fetch all issues`);
+          // Cache doesn't exist or invalid, will fetch all
         }
 
         // Determine limit: use provided limit, or apply default when DB is not configured
@@ -901,19 +933,75 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (!hasDatabaseConfig()) {
             // Apply default limit when DB is not configured (try-it-out mode)
             actualLimit = config.storage.defaultLimit?.issues;
+            console.error(`[GitHub Issues] No database configured, applying default limit: ${actualLimit}`);
+          } else {
+            console.error(`[GitHub Issues] Database configured, no limit applied (will fetch all issues)`);
           }
+        } else {
+          console.error(`[GitHub Issues] Using provided limit: ${actualLimit}`);
         }
 
         const githubToken = process.env.GITHUB_TOKEN;
-        const newIssues = await fetchAllGitHubIssues(githubToken, true, undefined, undefined, sinceDate, actualLimit);
+        console.error(`[GitHub Issues] Starting to fetch issues from GitHub API...`);
+        const startTime = Date.now();
+        
+        // Prepare existing issues for resume capability (even if not incremental, we can resume from partial cache)
+        const existingIssuesForResume = existingCache?.issues || [];
+        let accumulatedIssues = [...existingIssuesForResume];
+        
+        // Callback to save progress incrementally after each batch
+        const onBatchComplete = async (batchIssues: GitHubIssue[]) => {
+          // Merge new batch with accumulated issues
+          accumulatedIssues = mergeIssues(accumulatedIssues, batchIssues);
+          
+          // Save progress to cache file (only if not using database)
+          const { hasDatabaseConfig } = await import("../storage/factory.js");
+          if (!hasDatabaseConfig()) {
+            const progressCache: IssuesCache = {
+              fetched_at: new Date().toISOString(),
+              total_count: accumulatedIssues.length,
+              open_count: accumulatedIssues.filter((i) => i.state === "open").length,
+              closed_count: accumulatedIssues.filter((i) => i.state === "closed").length,
+              issues: accumulatedIssues,
+            };
+            
+            try {
+              const cacheDir = join(process.cwd(), githubConfig.paths.cacheDir);
+              await mkdir(cacheDir, { recursive: true });
+              await writeFile(cachePath, JSON.stringify(progressCache, null, 2), "utf-8");
+              console.error(`[GitHub Issues] Progress saved: ${accumulatedIssues.length} issues cached`);
+            } catch (error) {
+              // Don't fail the whole operation if progress save fails
+              console.error(`[GitHub Issues] Warning: Failed to save progress: ${error}`);
+            }
+          }
+        };
+        
+        const newIssues = await fetchAllGitHubIssues(
+          githubToken, 
+          true, 
+          undefined, 
+          undefined, 
+          sinceDate, 
+          actualLimit,
+          true, // includeComments
+          existingIssuesForResume, // Pass existing issues for resume
+          onBatchComplete // Pass callback for incremental saving
+        );
+        const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.error(`[GitHub Issues] Fetch completed in ${fetchTime}s. Fetched ${newIssues.length} issues.`);
 
         // Merge with existing cache if doing incremental update
         let finalIssues: GitHubIssue[];
         if (existingCache && newIssues.length > 0) {
+          console.error(`[GitHub Issues] Merging ${newIssues.length} new/updated issues with ${existingCache.issues.length} existing issues...`);
           finalIssues = mergeIssues(existingCache.issues, newIssues);
+          console.error(`[GitHub Issues] Merge complete: ${finalIssues.length} total issues`);
         } else if (existingCache && newIssues.length === 0) {
+          console.error(`[GitHub Issues] No new/updated issues found, using existing cache (${existingCache.issues.length} issues)`);
           finalIssues = existingCache.issues;
         } else {
+          console.error(`[GitHub Issues] No existing cache, using ${newIssues.length} newly fetched issues`);
           finalIssues = newIssues;
         }
 
@@ -953,10 +1041,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               author: issue.user.login,
               created_at: issue.created_at,
               updated_at: issue.updated_at,
+              comments: issue.comments || [],
+              assignees: issue.assignees || [],
+              milestone: issue.milestone || null,
+              reactions: issue.reactions || null,
             }));
             
+            console.error(`[GitHub Issues] Saving ${issuesToSave.length} issues to database...`);
             await storage.saveGitHubIssues(issuesToSave);
-            console.error(`[GitHub Issues] Saved ${issuesToSave.length} issues to database.`);
+            console.error(`[GitHub Issues] Successfully saved ${issuesToSave.length} issues to database.`);
             savedToDatabase = true;
           } catch (dbError) {
             const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
@@ -974,8 +1067,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Directory might already exist
           }
 
+          console.error(`[GitHub Issues] Saving ${cacheData.total_count} issues to JSON cache...`);
           await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
-          console.error(`[GitHub Issues] Saved to JSON cache (database not configured).`);
+          console.error(`[GitHub Issues] Successfully saved to JSON cache at ${cachePath}`);
         }
 
         return {
@@ -1065,6 +1159,36 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               computed: result.computed,
               cached: result.cached,
               total: result.total,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    case "compute_feature_embeddings": {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("OPENAI_API_KEY is required for computing feature embeddings.");
+      }
+
+      const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
+      
+      const force = (args?.force === true);
+      
+      console.error("[Embeddings] Starting feature embeddings computation...");
+      console.error("[Embeddings] This will include: documentation context, related GitHub issues, Discord conversations, and code context from repository (if GITHUB_REPO_URL is configured)");
+      if (force) {
+        console.error("[Embeddings] Force mode enabled - will recompute all embeddings");
+      }
+      
+      await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY, undefined, force);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: "Feature embeddings computed successfully. Features now include documentation context, related GitHub issues, and code context from repository (if configured).",
             }, null, 2),
           },
         ],
@@ -1466,37 +1590,37 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // If classify_all is true, don't use incremental fetch - we want ALL messages
       // This ensures we can classify older messages that were previously skipped
       if (!classify_all) {
-        try {
-          await storage.upsertChannel(actualChannelId, channelName, guildId);
-          
-          // Check if database is available and get most recent message date from it
-          if (useDatabase) {
-            // Get most recent message date from database
-            const { prisma } = await import("../storage/db/prisma.js");
-            const mostRecent = await prisma.discordMessage.findFirst({
-              where: { channelId: actualChannelId },
-              orderBy: { createdAt: "desc" },
-              select: { createdAt: true },
-            });
-            if (mostRecent) {
-              sinceDiscordDate = mostRecent.createdAt.toISOString();
-              console.error(`[Classification] Using database for incremental check. Most recent message: ${sinceDiscordDate}`);
-            }
+      try {
+        await storage.upsertChannel(actualChannelId, channelName, guildId);
+        
+        // Check if database is available and get most recent message date from it
+        if (useDatabase) {
+          // Get most recent message date from database
+          const { prisma } = await import("../storage/db/prisma.js");
+          const mostRecent = await prisma.discordMessage.findFirst({
+            where: { channelId: actualChannelId },
+            orderBy: { createdAt: "desc" },
+            select: { createdAt: true },
+          });
+          if (mostRecent) {
+            sinceDiscordDate = mostRecent.createdAt.toISOString();
+            console.error(`[Classification] Using database for incremental check. Most recent message: ${sinceDiscordDate}`);
           }
-        } catch (error) {
-          console.error(`[Classification] Failed to upsert channel or check database (continuing):`, error);
         }
+      } catch (error) {
+        console.error(`[Classification] Failed to upsert channel or check database (continuing):`, error);
+      }
 
-        // Fallback to JSON cache if database is not available
-        let existingDiscordCache: DiscordCache | null = null;
-        if (!useDatabase || !sinceDiscordDate) {
-          try {
-            const foundCachePath = await findDiscordCacheFile(actualChannelId);
-            if (foundCachePath) {
-              existingDiscordCache = await loadDiscordCache(foundCachePath);
-              if (!sinceDiscordDate) {
-                sinceDiscordDate = getMostRecentMessageDate(existingDiscordCache);
-              }
+      // Fallback to JSON cache if database is not available
+      let existingDiscordCache: DiscordCache | null = null;
+      if (!useDatabase || !sinceDiscordDate) {
+        try {
+          const foundCachePath = await findDiscordCacheFile(actualChannelId);
+          if (foundCachePath) {
+            existingDiscordCache = await loadDiscordCache(foundCachePath);
+            if (!sinceDiscordDate) {
+              sinceDiscordDate = getMostRecentMessageDate(existingDiscordCache);
+            }
             }
           } catch (error) {
             // Cache doesn't exist or invalid
@@ -2506,6 +2630,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               author: issue.user.login,
               created_at: issue.created_at,
               updated_at: issue.updated_at,
+              comments: issue.comments || [],
+              assignees: issue.assignees || [],
+              milestone: issue.milestone || null,
+              reactions: issue.reactions || null,
             }));
             await storage.saveGitHubIssues(issuesToSave);
           } catch (error) {
@@ -3074,6 +3202,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   author: issue.user.login,
                   created_at: issue.created_at,
                   updated_at: issue.updated_at,
+                  comments: issue.comments || [],
+                  assignees: issue.assignees || [],
+                  milestone: issue.milestone || null,
+                  reactions: issue.reactions || null,
                 })));
                 
                 console.error(`[Grouping] Fetched and saved ${newIssues.length} GitHub issues to database`);
@@ -4382,61 +4514,61 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Fall back to JSON file if database didn't have data or grouping_data_path was provided
         if (!groupingData) {
-          if (grouping_data_path) {
-            groupingPath = grouping_data_path;
-          } else {
-            if (!actualChannelId) {
-              throw new Error("Either grouping_data_path or channel_id must be provided");
-            }
-            
-            const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
-            const existingGroupingFile = existingGroupingFiles
-              .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
-              .sort()
-              .reverse()[0];
-            
-            if (!existingGroupingFile) {
-              throw new Error(`No grouping file found for channel ${actualChannelId}. Run suggest_grouping first.`);
-            }
-            
-            groupingPath = join(resultsDir, existingGroupingFile);
+        if (grouping_data_path) {
+          groupingPath = grouping_data_path;
+        } else {
+          if (!actualChannelId) {
+            throw new Error("Either grouping_data_path or channel_id must be provided");
           }
+          
+          const existingGroupingFiles = await readdir(resultsDir).catch(() => []);
+          const existingGroupingFile = existingGroupingFiles
+            .filter(f => f.startsWith(`grouping-`) && f.includes(actualChannelId) && f.endsWith('.json'))
+            .sort()
+            .reverse()[0];
+          
+          if (!existingGroupingFile) {
+            throw new Error(`No grouping file found for channel ${actualChannelId}. Run suggest_grouping first.`);
+          }
+          
+          groupingPath = join(resultsDir, existingGroupingFile);
+        }
 
           // Load grouping data from JSON file
-          const groupingContent = await readFile(groupingPath, "utf-8");
+        const groupingContent = await readFile(groupingPath, "utf-8");
           groupingData = safeJsonParse<{
-            timestamp: string;
-            updated_at?: string;
-            channel_id: string;
-            grouping_method: string;
-            stats: {
-              totalThreads: number;
-              groupedThreads: number;
-              ungroupedThreads: number;
-              uniqueIssues: number;
-              multiThreadGroups: number;
-              singleThreadGroups: number;
-              cross_cutting_groups?: number;
-              features_extracted?: number;
-              groups_matched?: number;
-              total_groups_in_file?: number;
-              total_ungrouped_in_file?: number;
-              newly_grouped?: number;
-              newly_ungrouped?: number;
-              previously_grouped?: number;
-              previously_ungrouped?: number;
-              totalSignals?: number;
-              groupedSignals?: number;
-              crossCuttingGroups?: number;
-              embeddingsComputed?: number;
-              embeddingsFromCache?: number;
-              ungrouped_count?: number;
-              ungrouped_threads_matched?: number;
-            };
-            groups: Group[];
-            ungrouped_threads?: Array<UngroupedThread & { channel_id?: string }>;
-            features?: Array<{ id: string; name: string }>;
-          }>(groupingContent, groupingPath);
+          timestamp: string;
+          updated_at?: string;
+          channel_id: string;
+          grouping_method: string;
+          stats: {
+            totalThreads: number;
+            groupedThreads: number;
+            ungroupedThreads: number;
+            uniqueIssues: number;
+            multiThreadGroups: number;
+            singleThreadGroups: number;
+            cross_cutting_groups?: number;
+            features_extracted?: number;
+            groups_matched?: number;
+            total_groups_in_file?: number;
+            total_ungrouped_in_file?: number;
+            newly_grouped?: number;
+            newly_ungrouped?: number;
+            previously_grouped?: number;
+            previously_ungrouped?: number;
+            totalSignals?: number;
+            groupedSignals?: number;
+            crossCuttingGroups?: number;
+            embeddingsComputed?: number;
+            embeddingsFromCache?: number;
+            ungrouped_count?: number;
+            ungrouped_threads_matched?: number;
+          };
+          groups: Group[];
+          ungrouped_threads?: Array<UngroupedThread & { channel_id?: string }>;
+          features?: Array<{ id: string; name: string }>;
+        }>(groupingContent, groupingPath);
         }
 
         // Get features from cache or extract from documentation
@@ -4478,11 +4610,78 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        // Map groups to features
-        // Log removed to avoid interfering with MCP JSON protocol
-        // console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to features...`);
+        // Debug: Check groups before mapping
+        console.error(`[DEBUG] Before mapping: ${groupingData.groups.length} groups`);
+        const sampleBefore = groupingData.groups[0];
+        if (sampleBefore) {
+          console.error(`[DEBUG] Sample group before: id=${sampleBefore.id}, has affects_features=${!!sampleBefore.affects_features}, value=${JSON.stringify(sampleBefore.affects_features)}`);
+        }
+        
+        // Map groups to features and save incrementally (in batches)
+        // This ensures progress is saved even if the process fails partway through
+        console.error(`[Feature Matching] Mapping ${groupingData.groups.length} groups to ${features.length} features (saving incrementally)...`);
         const { mapGroupsToFeatures, mapUngroupedThreadsToFeatures, mapUngroupedIssuesToFeatures } = await import("../export/featureMapper.js");
-        const groupsWithFeatures = await mapGroupsToFeatures(groupingData.groups, features, min_similarity) as Group[];
+        const { hasDatabaseConfig: hasDbConfig, getStorage: getStorageFn } = await import("../storage/factory.js");
+        const useDatabaseForIncrementalSaving = useDatabaseForStorage || (hasDbConfig() && await getStorageFn().isAvailable());
+        
+        // Process groups in batches, match each batch, then save immediately
+        const BATCH_SIZE = 50; // Process 50 groups at a time
+        const allGroupsWithFeatures: Group[] = [];
+        let totalMatched = 0;
+        let totalSaved = 0;
+        
+        for (let i = 0; i < groupingData.groups.length; i += BATCH_SIZE) {
+          const batch = groupingData.groups.slice(i, i + BATCH_SIZE);
+          const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+          const totalBatches = Math.ceil(groupingData.groups.length / BATCH_SIZE);
+          
+          console.error(`[Feature Matching] Processing batch ${batchNumber}/${totalBatches} (${batch.length} groups)...`);
+          
+          // Match this batch to features
+          const batchWithFeatures = await mapGroupsToFeatures(batch, features, min_similarity) as Group[];
+          allGroupsWithFeatures.push(...batchWithFeatures);
+          totalMatched += batchWithFeatures.length;
+          
+          // Save this batch immediately if database is available
+          if (useDatabaseForIncrementalSaving && batchWithFeatures.length > 0) {
+            try {
+              console.error(`[Feature Matching] Saving batch ${batchNumber} (${batchWithFeatures.length} groups) to database...`);
+              const storage = getStorageFn();
+              await storage.saveGroups(batchWithFeatures);
+              totalSaved += batchWithFeatures.length;
+              console.error(`[Feature Matching] Successfully saved batch ${batchNumber} (${totalSaved}/${totalMatched} groups saved so far)`);
+            } catch (batchSaveError) {
+              console.error(`[Feature Matching] ERROR: Failed to save batch ${batchNumber}: ${batchSaveError instanceof Error ? batchSaveError.message : String(batchSaveError)}`);
+              // Continue processing other batches even if one fails
+            }
+          }
+        }
+        
+        const groupsWithFeatures = allGroupsWithFeatures;
+        
+        // Debug: Check what was matched
+        console.error(`[DEBUG] After mapping: ${groupsWithFeatures.length} groups returned, ${totalSaved} saved to database`);
+        const groupsMatchedToSpecificFeatures = groupsWithFeatures.filter(g => 
+          g.affects_features && 
+          g.affects_features.length > 0 && 
+          !(g.affects_features.length === 1 && g.affects_features[0]?.id === "general")
+        );
+        console.error(`[DEBUG] Groups matched to specific features (not General): ${groupsMatchedToSpecificFeatures.length} out of ${groupsWithFeatures.length}`);
+        
+        const sampleGroup = groupsWithFeatures[0];
+        if (sampleGroup) {
+          console.error(`[DEBUG] Sample group ${sampleGroup.id}: affects_features=${JSON.stringify(sampleGroup.affects_features)}, is_cross_cutting=${sampleGroup.is_cross_cutting}`);
+        }
+        
+        // Check if all groups matched to General
+        const allGeneral = groupsWithFeatures.every(g => 
+          g.affects_features && 
+          g.affects_features.length === 1 && 
+          g.affects_features[0]?.id === "general"
+        );
+        if (allGeneral && groupsWithFeatures.length > 0) {
+          console.error(`[DEBUG] WARNING: ALL ${groupsWithFeatures.length} groups matched to General! This suggests similarity scores are too low or embeddings aren't working.`);
+        }
 
         // Map ungrouped threads to features
         if (groupingData.ungrouped_threads && groupingData.ungrouped_threads.length > 0) {
@@ -4507,8 +4706,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Map ungrouped issues to features (if using database)
         let ungroupedIssuesMatched = 0;
-        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
-        const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
+        const useDatabase = hasDbConfig() && await getStorageFn().isAvailable();
         
         if (useDatabase) {
           try {
@@ -4569,6 +4767,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         groupingData.groups = groupsWithFeatures;
         groupingData.features = features.map(f => ({ id: f.id, name: f.name }));
         
+        // Groups are already saved incrementally above, but we still need to:
+        // 1. Save ungrouped threads if using database
+        // 2. Save to JSON file as backup if needed
+        
         // Update timestamp fields - preserve original timestamp, update updated_at
         if (!groupingData.timestamp) {
           groupingData.timestamp = new Date().toISOString();
@@ -4590,19 +4792,46 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ungrouped_issues_matched: ungroupedIssuesMatched,
         };
 
-        // Save updated grouping data (to database or JSON file)
-        if (useDatabaseForStorage) {
-          // Save to database
-          const { getStorage } = await import("../storage/factory.js");
-          const storage = getStorage();
-          await storage.saveGroups(groupingData.groups);
-          await storage.saveUngroupedThreads(groupingData.ungrouped_threads || []);
+        // Save ungrouped threads and JSON backup (groups already saved incrementally)
+        const useDatabaseForSaving = useDatabaseForStorage || (hasDbConfig() && await getStorageFn().isAvailable());
+        
+        if (useDatabaseForSaving) {
+          // Save ungrouped threads (groups were already saved incrementally above)
+          if (groupingData.ungrouped_threads && groupingData.ungrouped_threads.length > 0) {
+            try {
+              console.error(`[Feature Matching] Saving ${groupingData.ungrouped_threads.length} ungrouped threads to database...`);
+              const storage = getStorageFn();
+              await storage.saveUngroupedThreads(groupingData.ungrouped_threads);
+              console.error(`[Feature Matching] Saved ungrouped threads to database successfully`);
+            } catch (threadsSaveError) {
+              console.error(`[Feature Matching] ERROR: Failed to save ungrouped threads: ${threadsSaveError instanceof Error ? threadsSaveError.message : String(threadsSaveError)}`);
+            }
+          }
+          
+          // Also save to JSON file as backup if groupingPath exists (optional)
+          if (groupingPath && !useDatabaseForStorage) {
+            console.error(`[Feature Matching] Also saving to JSON file as backup: ${groupingPath}`);
+            try {
+              await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+              console.error(`[Feature Matching] Saved to JSON file as backup`);
+            } catch (jsonError) {
+              console.error(`[Feature Matching] WARNING: Failed to save JSON backup: ${jsonError instanceof Error ? jsonError.message : String(jsonError)}`);
+            }
+          }
         } else if (groupingPath) {
-          // Save to JSON file
-          await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+          // Save to JSON file (fallback if no database)
+          console.error(`[Feature Matching] Saving to JSON file (no database available): ${groupingPath}`);
+          try {
+            await writeFile(groupingPath, JSON.stringify(groupingData, null, 2), "utf-8");
+            console.error(`[Feature Matching] Saved to JSON file successfully`);
+          } catch (jsonError) {
+            console.error(`[Feature Matching] ERROR: Failed to save to JSON file: ${jsonError instanceof Error ? jsonError.message : String(jsonError)}`);
+            throw jsonError;
+          }
+        } else {
+          console.error(`[Feature Matching] WARNING: No storage method available! useDatabaseForStorage=${useDatabaseForStorage}, useDatabaseForSaving=${useDatabaseForSaving}, groupingPath=${groupingPath}`);
         }
-        // Log removed to avoid interfering with MCP JSON protocol
-        // console.error(`[Feature Matching] Updated grouping data with feature matches`);
+        console.error(`[Feature Matching] Updated grouping data with feature matches`);
 
         return {
           content: [
