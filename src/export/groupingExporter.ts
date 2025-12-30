@@ -3115,6 +3115,14 @@ export async function exportIssuesToPMTool(
           issue.issueLabels?.forEach(l => allLabels.add(l));
         }
 
+        // Calculate priority based on labels and title
+        const groupPriority = calculatePriority({
+          labels: Array.from(allLabels),
+          title: group.suggestedTitle || groupIssueList[0]?.issueTitle || "",
+          is_cross_cutting: group.isCrossCutting,
+          thread_count: threadIds.length,
+        });
+
         pmIssues.push({
           title: group.suggestedTitle || `Issue Group ${group.id}`,
           description: descriptionParts.join("\n"),
@@ -3124,7 +3132,7 @@ export async function exportIssuesToPMTool(
           source_url: groupIssueList[0]?.issueUrl || "",
           source_id: `group-${group.id}`,
           labels: Array.from(allLabels),
-          priority: "medium", // Medium priority for groups
+          priority: groupPriority,
           metadata: {
             group_id: group.id,
             issue_count: groupIssueList.length,
@@ -3205,6 +3213,13 @@ export async function exportIssuesToPMTool(
         const labels = [...(issue.issueLabels || [])];
         if (threadMatches.length > 0) labels.push("discord-discussion");
 
+        // Calculate priority - ungrouped issues can still be security/bugs
+        const issuePriority = calculatePriority({
+          labels,
+          title: issue.issueTitle || "",
+          is_ungrouped: true,
+        });
+
         pmIssues.push({
           title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
           description: descriptionParts.join("\n"),
@@ -3214,7 +3229,7 @@ export async function exportIssuesToPMTool(
           source_url: issue.issueUrl,
           source_id: `github-issue-${issue.issueNumber}`,
           labels,
-          priority: "low", // Lower priority for ungrouped
+          priority: issuePriority,
           metadata: {
             issue_number: issue.issueNumber,
             issue_state: issue.issueState,
