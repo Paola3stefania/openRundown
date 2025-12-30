@@ -202,6 +202,9 @@ model GitHubIssue {
   // Feature matching (issue-centric)
   affectsFeatures      Json     @default("[]") @map("affects_features") // Array of {id, name} objects
   
+  // LLM-detected labels (bug, security, regression, enhancement, urgent)
+  detectedLabels       String[] @default([]) @map("detected_labels")
+  
   // Export status
   exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
   exportedAt           DateTime? @map("exported_at")

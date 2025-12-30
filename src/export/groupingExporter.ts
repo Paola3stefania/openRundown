@@ -3107,12 +3107,14 @@ export async function exportIssuesToPMTool(
           }
         }
 
-        // Collect all labels from issues in the group
+        // Collect all labels from issues in the group (GitHub labels + detected labels)
         const allLabels = new Set<string>();
         allLabels.add("issue-group");
         if (threadIds.length > 0) allLabels.add("discord-discussion");
         for (const issue of groupIssueList) {
           issue.issueLabels?.forEach(l => allLabels.add(l));
+          // Add LLM-detected labels from database
+          issue.detectedLabels?.forEach(l => allLabels.add(l));
         }
 
         // Calculate priority based on labels and title
@@ -3123,11 +3125,18 @@ export async function exportIssuesToPMTool(
           thread_count: threadIds.length,
         });
 
+        // Get features from issues in the group (use first issue's features, or aggregate)
+        const primaryIssue = groupIssueList[0];
+        const issueFeatures = primaryIssue?.affectsFeatures as Array<{ id: string; name: string }> | null;
+        const topFeature = issueFeatures && issueFeatures.length > 0 
+          ? issueFeatures[0] 
+          : { id: "general", name: "General" };
+
         pmIssues.push({
           title: group.suggestedTitle || `Issue Group ${group.id}`,
           description: descriptionParts.join("\n"),
-          feature_id: "general",
-          feature_name: "General",
+          feature_id: topFeature.id,
+          feature_name: topFeature.name,
           source: "github",
           source_url: groupIssueList[0]?.issueUrl || "",
           source_id: `group-${group.id}`,
@@ -3210,7 +3219,8 @@ export async function exportIssuesToPMTool(
           }
         }
 
-        const labels = [...(issue.issueLabels || [])];
+        // Collect labels (GitHub labels + LLM-detected labels from database)
+        const labels = [...(issue.issueLabels || []), ...(issue.detectedLabels || [])];
         if (threadMatches.length > 0) labels.push("discord-discussion");
 
         // Calculate priority - ungrouped issues can still be security/bugs
@@ -3220,11 +3230,17 @@ export async function exportIssuesToPMTool(
           is_ungrouped: true,
         });
 
+        // Get features from issue's affectsFeatures field
+        const issueFeatures = issue.affectsFeatures as Array<{ id: string; name: string }> | null;
+        const topFeature = issueFeatures && issueFeatures.length > 0 
+          ? issueFeatures[0] 
+          : { id: "general", name: "General" };
+
         pmIssues.push({
           title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
           description: descriptionParts.join("\n"),
-          feature_id: "general",
-          feature_name: "General",
+          feature_id: topFeature.id,
+          feature_name: topFeature.name,
           source: "github",
           source_url: issue.issueUrl,
           source_id: `github-issue-${issue.issueNumber}`,

@@ -558,6 +558,26 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "label_github_issues",
+    description: "[Issue-centric] Detect and assign labels (bug, security, regression, enhancement, urgent) to GitHub issues using LLM. Updates the detectedLabels field in the github_issues table. This should be run before export to ensure proper priority assignment. Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_closed: {
+          type: "boolean",
+          description: "Include closed issues (default: false, only open issues)",
+          default: false,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-label all issues even if they already have detectedLabels. If false (default), only label issues without detected labels.",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "classify_linear_issues",
     description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
     inputSchema: {
@@ -6947,6 +6967,205 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Issue feature matching failed:", error);
         throw new Error(`Issue feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "label_github_issues": {
+      const {
+        include_closed = false,
+        force = false,
+      } = args as {
+        include_closed?: boolean;
+        force?: boolean;
+      };
+
+      try {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          throw new Error("OPENAI_API_KEY is required for label detection.");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for issue labeling. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        // Load GitHub issues from database
+        console.error(`[Label Issues] Loading GitHub issues from database...`);
+        const allDbIssues = await prisma.gitHubIssue.findMany({
+          where: include_closed ? {} : { issueState: "open" },
+          orderBy: { issueNumber: 'desc' },
+        });
+        
+        // Filter issues based on force flag
+        const allIssues = force 
+          ? allDbIssues 
+          : allDbIssues.filter(issue => !issue.detectedLabels || issue.detectedLabels.length === 0);
+        
+        console.error(`[Label Issues] Found ${allIssues.length} issues to label (${allDbIssues.length} total, force=${force})`);
+
+        if (allIssues.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: force 
+                  ? "No issues found in database. Run fetch_github_issues first."
+                  : "All issues already have labels. Use force=true to re-label.",
+                stats: { total_issues: 0, labeled: 0, skipped: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+
+        // Valid labels
+        const validLabels = ["security", "bug", "regression", "urgent", "enhancement"];
+        
+        // Process in batches of 10
+        const batchSize = 10;
+        let labeledCount = 0;
+        let skippedCount = 0;
+        const labelCounts = new Map<string, number>();
+
+        for (let i = 0; i < allIssues.length; i += batchSize) {
+          const batch = allIssues.slice(i, i + batchSize);
+          
+          // Build batch content for LLM
+          const batchContent = batch.map((issue, idx) => 
+            `[${idx + 1}] Title: ${issue.issueTitle}${issue.issueBody ? `\nDescription: ${issue.issueBody.substring(0, 200)}` : ""}`
+          ).join("\n\n---\n\n");
+          
+          try {
+            const response = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages: [
+                  {
+                    role: "system",
+                    content: `You are a technical issue classifier. Analyze each issue and return applicable labels.
+
+Available labels:
+- security: Security vulnerabilities, auth issues, data leaks, XSS, CSRF, injection
+- bug: Software defects, errors, crashes, things not working
+- regression: Something that worked before but broke after update/release
+- urgent: Critical issues, production outages, blockers
+- enhancement: Feature requests, improvements, suggestions
+
+Rules:
+1. Return one line per issue: "[number] label1, label2" or "[number] none"
+2. If regression, also include bug
+3. Be conservative - only label if confident
+4. Questions/docs are "none"
+
+Example output:
+[1] bug
+[2] security
+[3] regression, bug
+[4] enhancement
+[5] none`
+                  },
+                  {
+                    role: "user",
+                    content: `Classify these ${batch.length} issues:\n\n${batchContent}`
+                  }
+                ],
+                temperature: 0.1,
+                max_tokens: 200,
+              }),
+            });
+            
+            if (!response.ok) {
+              console.error(`[Label Issues] LLM API error for batch ${i / batchSize + 1}`);
+              skippedCount += batch.length;
+              continue;
+            }
+            
+            const data = await response.json();
+            const result = data.choices[0]?.message?.content?.trim() || "";
+            
+            // Parse results
+            const lines = result.split("\n").filter((l: string) => l.trim());
+            
+            for (const line of lines) {
+              const match = line.match(/\[(\d+)\]\s*(.+)/);
+              if (match) {
+                const batchIdx = parseInt(match[1], 10) - 1;
+                const labelsStr = match[2].trim().toLowerCase();
+                
+                if (batchIdx >= 0 && batchIdx < batch.length) {
+                  const issue = batch[batchIdx];
+                  
+                  let detectedLabels: string[] = [];
+                  if (labelsStr !== "none" && labelsStr) {
+                    detectedLabels = labelsStr
+                      .split(",")
+                      .map((l: string) => l.trim())
+                      .filter((l: string) => validLabels.includes(l));
+                  }
+                  
+                  // Update issue in database
+                  await prisma.gitHubIssue.update({
+                    where: { issueNumber: issue.issueNumber },
+                    data: { detectedLabels },
+                  });
+                  
+                  labeledCount++;
+                  for (const label of detectedLabels) {
+                    labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+                  }
+                }
+              }
+            }
+            
+          } catch (batchError) {
+            console.error(`[Label Issues] Error processing batch:`, batchError);
+            skippedCount += batch.length;
+          }
+          
+          // Log progress
+          if ((i + batchSize) % 50 === 0 || i + batchSize >= allIssues.length) {
+            console.error(`[Label Issues] Processed ${Math.min(i + batchSize, allIssues.length)}/${allIssues.length} issues...`);
+          }
+        }
+
+        console.error(`[Label Issues] Completed: ${labeledCount} labeled, ${skippedCount} skipped`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Labeled ${labeledCount} issues`,
+              stats: {
+                total_issues: allIssues.length,
+                labeled: labeledCount,
+                skipped: skippedCount,
+              },
+              label_distribution: Object.fromEntries(
+                [...labelCounts.entries()].sort((a, b) => b[1] - a[1])
+              ),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Issue labeling failed:", error);
+        throw new Error(`Issue labeling failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
