@@ -988,9 +988,51 @@ export class LinearIntegration extends BasePMTool {
   }
 
   /**
-   * Fetch all existing labels from Linear workspace
+   * Fetch existing labels from Linear for our team
+   * Only fetches team-specific labels to avoid "incorrect team" errors
    */
   private async fetchExistingLabels(): Promise<void> {
+    // If we have a team ID, fetch labels for that team specifically
+    if (this.teamId) {
+      const teamQuery = `
+        query GetTeamLabels($teamId: String!) {
+          team(id: $teamId) {
+            labels {
+              nodes {
+                id
+                name
+              }
+            }
+          }
+        }
+      `;
+      
+      try {
+        const response = await this.graphqlRequest<{
+          team?: {
+            labels?: {
+              nodes?: Array<{
+                id: string;
+                name: string;
+              }>;
+            };
+          };
+        }>(teamQuery, { teamId: this.teamId });
+        
+        if (response.data?.team?.labels?.nodes) {
+          for (const label of response.data.team.labels.nodes) {
+            const normalizedName = label.name.toLowerCase();
+            this.labelCache.set(normalizedName, label.id);
+          }
+          log(`Fetched ${response.data.team.labels.nodes.length} labels for team ${this.teamId}`);
+        }
+        return;
+      } catch (error) {
+        logError("Failed to fetch team labels, falling back to workspace labels:", error);
+      }
+    }
+
+    // Fallback: fetch all workspace labels (may cause issues with team-specific labels)
     const query = `
       query GetLabels {
         issueLabels {
