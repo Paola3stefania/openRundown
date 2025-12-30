@@ -2855,7 +2855,7 @@ export async function exportIssuesToPMTool(
       }
     }
 
-    // STEP 1: Get all open GitHub issues from database
+    // Verify database is available
     const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
     const useDatabase = hasDatabaseConfig() && await getStorage().isAvailable();
     
@@ -2863,14 +2863,44 @@ export async function exportIssuesToPMTool(
       throw new Error("Database is required for issue-centric export. Please configure DATABASE_URL.");
     }
 
-    // Get issues directly from database to get all fields including export status
     const { prisma } = await import("../storage/db/prisma.js");
-    const allIssues = await prisma.gitHubIssue.findMany({
-      where: includeClosed ? {} : { issueState: "open" },
+
+    // =============================================================
+    // STEP 1: Get GROUPS (each group becomes 1 Linear issue)
+    // =============================================================
+    log("Loading groups from database...");
+    const groups = await prisma.group.findMany({
+      where: channelId ? { channelId } : {},
+      orderBy: { createdAt: 'desc' },
+    });
+    log(`Found ${groups.length} groups`);
+
+    // Get all issues that are in groups
+    const groupedIssues = await prisma.gitHubIssue.findMany({
+      where: {
+        inGroup: true,
+        ...(includeClosed ? {} : { issueState: "open" }),
+      },
       orderBy: { issueNumber: 'desc' },
     });
+    log(`Found ${groupedIssues.length} issues in groups`);
 
-    log(`Found ${allIssues.length} GitHub issues to export (${includeClosed ? 'including closed' : 'open only'})`);
+    // =============================================================
+    // STEP 2: Get UNGROUPED ISSUES (each becomes 1 Linear issue)
+    // =============================================================
+    log("Loading ungrouped issues from database...");
+    const ungroupedIssues = await prisma.gitHubIssue.findMany({
+      where: {
+        inGroup: false,
+        ...(includeClosed ? {} : { issueState: "open" }),
+      },
+      orderBy: { issueNumber: 'desc' },
+    });
+    log(`Found ${ungroupedIssues.length} ungrouped issues`);
+
+    // Verify we have all issues
+    const allIssues = [...groupedIssues, ...ungroupedIssues];
+    log(`Total issues to export: ${allIssues.length} (${groupedIssues.length} grouped + ${ungroupedIssues.length} ungrouped)`);
 
     // STEP 2: Load Discord messages from database
     let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
@@ -2963,205 +2993,202 @@ export async function exportIssuesToPMTool(
       }
     }
 
-    // STEP 3: Classify all issues
-    log("Classifying GitHub issues...");
-    const issuesWithClassification = await Promise.all(
-      allIssues.map(async (issue) => {
-        const classification = await classifyGitHubIssue({
-          issueNumber: issue.issueNumber,
-          issueTitle: issue.issueTitle,
-          issueBody: issue.issueBody,
-          issueLabels: issue.issueLabels,
-        });
-        return { ...issue, classification };
-      })
-    );
-    log(`Classified ${issuesWithClassification.length} issues`);
-
-    // STEP 4: Group similar issues
-    log("Grouping similar issues...");
-    const groupingResult = await groupGitHubIssues(issuesWithClassification);
-    log(`Created ${groupingResult.groups.length} groups, ${groupingResult.ungrouped.length} ungrouped issues`);
-
-    // STEP 5: Load features for matching ungrouped issues
-    let features: Array<{ id: string; name: string; description?: string; related_keywords?: string[] }> = [];
-    try {
-      const storage = getStorage();
-      // Try to get features from database or config
-      // For now, use a default "General" feature
-      features = [{ id: "general", name: "General", description: "General issues", related_keywords: [] }];
-    } catch (error) {
-      logError("Error loading features:", error);
-    }
-
-    // STEP 6: Match ungrouped issues to features
-    log("Matching ungrouped issues to features...");
-    const issuesMap = new Map(
-      issuesWithClassification.map(issue => [
-        issue.issueNumber,
-        { issueTitle: issue.issueTitle, issueBody: issue.issueBody }
-      ])
-    );
-    const featureMatches = await matchUngroupedIssuesToFeatures(
-      groupingResult.ungrouped,
-      features,
-      issuesMap
-    );
-    log(`Matched ${featureMatches.size} ungrouped issues to features`);
-
-    // STEP 7: Build export data with classification, grouping, features, priority, and Discord context
+    // =============================================================
+    // STEP 3: Build PM Issues - GROUPS (1 Linear issue per group)
+    // =============================================================
     const pmIssues: PMToolIssue[] = [];
-    const issueGroupMap = new Map<number, string>();
-    
-    // Map issues to their groups
-    for (const group of groupingResult.groups) {
-      for (const issueNumber of group.issues) {
-        issueGroupMap.set(issueNumber, group.id);
-      }
-    }
+    const groupIssueNumbers = new Set<number>(); // Track which issues are in groups
 
-    for (const issue of issuesWithClassification) {
+    log(`Processing ${groups.length} groups...`);
+    for (const group of groups) {
       try {
-        // Find Discord threads that match this issue (from issue-centered table)
-        const threadMatches = await prisma.issueThreadMatch.findMany({
-          where: {
-            issueNumber: issue.issueNumber,
-          },
-          orderBy: {
-            similarityScore: 'desc',
-          },
-        });
-
-        // Find relevant Discord messages
-        const discordMessages = await findRelevantDiscordMessages(
-          {
-            issueNumber: issue.issueNumber,
-            issueTitle: issue.issueTitle,
-            issueBody: issue.issueBody,
-          },
-          discordCache,
-          threadMatches.map(m => ({ threadId: m.threadId, similarityScore: Number(m.similarityScore) }))
-        );
-
-        // Determine feature
-        let featureId = "general";
-        let featureName = "General";
-        const groupId = issueGroupMap.get(issue.issueNumber);
+        // Get all GitHub issues in this group
+        const groupIssueList = groupedIssues.filter(i => i.groupId === group.id);
+        groupIssueList.forEach(i => groupIssueNumbers.add(i.issueNumber));
         
-        if (groupId) {
-          // Issue is in a group - could assign group-level feature
-          featureId = "general";
-        } else {
-          // Ungrouped issue - use feature match if available
-          const featureMatch = featureMatches.get(issue.issueNumber);
-          if (featureMatch) {
-            featureId = featureMatch.featureId;
-            featureName = featureMatch.featureName;
-          }
+        if (groupIssueList.length === 0) {
+          log(`Skipping group ${group.id} - no issues found`);
+          continue;
         }
 
-        // Build description with GitHub issue + classification + Discord context
+        // Get all thread matches for issues in this group
+        const groupThreadMatches = await prisma.issueThreadMatch.findMany({
+          where: {
+            issueNumber: { in: groupIssueList.map(i => i.issueNumber) },
+          },
+          orderBy: { similarityScore: 'desc' },
+        });
+
+        // Get Discord messages for matched threads
+        const threadIds = [...new Set(groupThreadMatches.map(m => m.threadId))];
+        const discordThreads = discordCache?.threads || {};
+        
+        // Build description with ALL issues in the group + ALL threads
         const descriptionParts: string[] = [];
         
-        // GitHub issue content
-        descriptionParts.push("## GitHub Issue");
+        descriptionParts.push(`# ${group.suggestedTitle}`);
         descriptionParts.push("");
-        descriptionParts.push(`**Issue:** [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
-        
-        // Classification info
-        if (issue.classification) {
-          descriptionParts.push("");
-          descriptionParts.push("### Classification");
-          descriptionParts.push(`- **Category:** ${issue.classification.category}`);
-          descriptionParts.push(`- **Type:** ${issue.classification.type}`);
-          if (issue.classification.severity) {
-            descriptionParts.push(`- **Severity:** ${issue.classification.severity}`);
-          }
-          descriptionParts.push(`- **Requires Action:** ${issue.classification.requiresAction ? "Yes" : "No"}`);
-        }
-        
-        // Grouping info
-        if (groupId) {
-          const group = groupingResult.groups.find(g => g.id === groupId);
-          if (group) {
-            descriptionParts.push("");
-            descriptionParts.push("### Grouping");
-            descriptionParts.push(`- **Group:** ${group.title}`);
-            descriptionParts.push(`- **Related Issues:** ${group.issues.length} issues in this group`);
+        descriptionParts.push(`**Group ID:** ${group.id}`);
+        descriptionParts.push(`**Issues in group:** ${groupIssueList.length}`);
+        descriptionParts.push(`**Related Discord threads:** ${threadIds.length}`);
+        descriptionParts.push("");
+
+        // List all GitHub issues in the group
+        descriptionParts.push("## GitHub Issues");
+        descriptionParts.push("");
+        for (const issue of groupIssueList.slice(0, 20)) { // Limit to first 20
+          descriptionParts.push(`- [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
+          if (issue.issueLabels && issue.issueLabels.length > 0) {
+            descriptionParts.push(`  Labels: ${issue.issueLabels.join(", ")}`);
           }
         }
-        
-        if (issue.issueBody) {
-          descriptionParts.push("");
-          descriptionParts.push("### Description");
-          descriptionParts.push(issue.issueBody.substring(0, 2000)); // Limit body length
+        if (groupIssueList.length > 20) {
+          descriptionParts.push(`- ... and ${groupIssueList.length - 20} more issues`);
         }
         descriptionParts.push("");
 
-        // Discord context (if any threads match)
-        if (discordMessages.length > 0) {
+        // Add Discord thread context
+        if (threadIds.length > 0) {
           descriptionParts.push("## Related Discord Discussions");
           descriptionParts.push("");
           
-          for (const discordData of discordMessages.slice(0, 3)) { // Limit to top 3 matches
-            descriptionParts.push(`### ${discordData.threadName}`);
-            descriptionParts.push("");
-            descriptionParts.push(`- **Similarity:** ${Math.round(discordData.similarity * 100)}%`);
-            descriptionParts.push(`- **Messages:** ${discordData.messages.length}`);
+          for (const threadId of threadIds.slice(0, 5)) { // Limit to top 5 threads
+            const threadMatch = groupThreadMatches.find(m => m.threadId === threadId);
+            const threadData = discordThreads[threadId];
             
-            // Add key messages
-            if (discordData.messages.length > 0) {
-              const firstMessage = discordData.messages[0];
-              descriptionParts.push(`- **First message:** ${firstMessage.author}: ${firstMessage.content.substring(0, 200)}`);
-              
-              if (discordData.messages.length > 1) {
-                const lastMessage = discordData.messages[discordData.messages.length - 1];
-                descriptionParts.push(`- **Last message:** ${lastMessage.author}: ${lastMessage.content.substring(0, 200)}`);
-              }
+            descriptionParts.push(`### ${threadMatch?.threadName || threadId}`);
+            if (threadMatch?.threadUrl) {
+              descriptionParts.push(`[View Thread](${threadMatch.threadUrl})`);
             }
+            descriptionParts.push(`- **Similarity:** ${threadMatch?.similarityScore || 0}%`);
+            descriptionParts.push(`- **Messages:** ${threadMatch?.messageCount || threadData?.message_count || 0}`);
             
+            // Add sample messages if available
+            if (threadData?.messages && threadData.messages.length > 0) {
+              const firstMsg = threadData.messages[0];
+              descriptionParts.push(`- **First message:** ${firstMsg.author.username}: ${firstMsg.content.substring(0, 150)}...`);
+            }
+            descriptionParts.push("");
+          }
+          if (threadIds.length > 5) {
+            descriptionParts.push(`... and ${threadIds.length - 5} more threads`);
+          }
+        }
+
+        // Collect all labels from issues in the group
+        const allLabels = new Set<string>();
+        allLabels.add("issue-group");
+        if (threadIds.length > 0) allLabels.add("discord-discussion");
+        for (const issue of groupIssueList) {
+          issue.issueLabels?.forEach(l => allLabels.add(l));
+        }
+
+        pmIssues.push({
+          title: group.suggestedTitle || `Issue Group ${group.id}`,
+          description: descriptionParts.join("\n"),
+          feature_id: "general",
+          feature_name: "General",
+          source: "github",
+          source_url: groupIssueList[0]?.issueUrl || "",
+          source_id: `group-${group.id}`,
+          labels: Array.from(allLabels),
+          priority: "medium", // Medium priority for groups
+          metadata: {
+            group_id: group.id,
+            issue_count: groupIssueList.length,
+            issue_numbers: groupIssueList.map(i => i.issueNumber),
+            discord_threads_count: threadIds.length,
+            discord_thread_ids: threadIds,
+          },
+          linear_issue_id: group.linearIssueId || undefined,
+          linear_issue_identifier: group.linearIssueIdentifier || undefined,
+        });
+
+        log(`Prepared group ${group.id} with ${groupIssueList.length} issues, ${threadIds.length} threads`);
+
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logError(`Error processing group ${group.id}:`, error);
+        result.errors?.push(`Group ${group.id}: ${errorMsg}`);
+      }
+    }
+
+    // =============================================================
+    // STEP 4: Build PM Issues - UNGROUPED (1 Linear issue per issue)
+    // =============================================================
+    log(`Processing ${ungroupedIssues.length} ungrouped issues...`);
+    for (const issue of ungroupedIssues) {
+      try {
+        // Get thread matches for this issue
+        const threadMatches = await prisma.issueThreadMatch.findMany({
+          where: { issueNumber: issue.issueNumber },
+          orderBy: { similarityScore: 'desc' },
+        });
+
+        const threadIds = threadMatches.map(m => m.threadId);
+        const discordThreads = discordCache?.threads || {};
+
+        // Build description
+        const descriptionParts: string[] = [];
+        
+        descriptionParts.push("## GitHub Issue");
+        descriptionParts.push("");
+        descriptionParts.push(`**Issue:** [#${issue.issueNumber}](${issue.issueUrl}) - ${issue.issueTitle}`);
+        descriptionParts.push(`**State:** ${issue.issueState || "open"}`);
+        descriptionParts.push(`**Author:** ${issue.issueAuthor || "unknown"}`);
+        if (issue.issueLabels && issue.issueLabels.length > 0) {
+          descriptionParts.push(`**Labels:** ${issue.issueLabels.join(", ")}`);
+        }
+        descriptionParts.push("");
+        
+        if (issue.issueBody) {
+          descriptionParts.push("### Description");
+          descriptionParts.push(issue.issueBody.substring(0, 2000));
+          descriptionParts.push("");
+        }
+
+        // Add Discord context
+        if (threadMatches.length > 0) {
+          descriptionParts.push("## Related Discord Discussions");
+          descriptionParts.push("");
+          
+          for (const match of threadMatches.slice(0, 3)) {
+            const threadData = discordThreads[match.threadId];
+            
+            descriptionParts.push(`### ${match.threadName || match.threadId}`);
+            if (match.threadUrl) {
+              descriptionParts.push(`[View Thread](${match.threadUrl})`);
+            }
+            descriptionParts.push(`- **Similarity:** ${match.similarityScore}%`);
+            descriptionParts.push(`- **Messages:** ${match.messageCount || threadData?.message_count || 0}`);
+            
+            if (threadData?.messages && threadData.messages.length > 0) {
+              const firstMsg = threadData.messages[0];
+              descriptionParts.push(`- **First message:** ${firstMsg.author.username}: ${firstMsg.content.substring(0, 150)}...`);
+            }
             descriptionParts.push("");
           }
         }
 
-        // Create PM tool issue
         const labels = [...(issue.issueLabels || [])];
-        if (discordMessages.length > 0) {
-          labels.push("discord-discussion");
-        }
-        if (issue.classification) {
-          labels.push(`classification:${issue.classification.category}`);
-          labels.push(`type:${issue.classification.type}`);
-        }
-
-        // Assign priority
-        const priority = assignIssuePriority({
-          issueLabels: issue.issueLabels,
-          classification: issue.classification,
-          hasDiscordContext: discordMessages.length > 0,
-          isInGroup: !!groupId,
-        });
+        if (threadMatches.length > 0) labels.push("discord-discussion");
 
         pmIssues.push({
           title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
           description: descriptionParts.join("\n"),
-          feature_id: featureId,
-          feature_name: featureName,
+          feature_id: "general",
+          feature_name: "General",
           source: "github",
           source_url: issue.issueUrl,
           source_id: `github-issue-${issue.issueNumber}`,
           labels,
-          priority,
+          priority: "low", // Lower priority for ungrouped
           metadata: {
             issue_number: issue.issueNumber,
             issue_state: issue.issueState,
-            classification: issue.classification,
-            group_id: groupId,
-            discord_threads_count: discordMessages.length,
-            discord_thread_ids: discordMessages.map(m => m.threadId),
-            feature_match: featureMatches.get(issue.issueNumber),
+            discord_threads_count: threadMatches.length,
+            discord_thread_ids: threadIds,
           },
-          // Pass existing Linear issue ID if issue already has one (from previous export)
           linear_issue_id: issue.linearIssueId || undefined,
           linear_issue_identifier: issue.linearIssueIdentifier || undefined,
         });
@@ -3173,32 +3200,52 @@ export async function exportIssuesToPMTool(
       }
     }
 
-    log(`Prepared ${pmIssues.length} issues for export`);
+    log(`Prepared ${pmIssues.length} PM issues for export (${groups.length} groups + ${ungroupedIssues.length} ungrouped)`);
 
-    // STEP 4: Export issues to PM tool
+    // =============================================================
+    // STEP 5: Export to PM tool
+    // =============================================================
     const exportResult = await pmTool.exportIssues(pmIssues);
 
-    // STEP 5: Update database with export status
+    // =============================================================
+    // STEP 6: Update database with export status
+    // =============================================================
     if (exportResult.success) {
       try {
-        for (const issue of pmIssues) {
-          if (issue.linear_issue_id && issue.source_id.startsWith("github-issue-")) {
-            const issueNumber = parseInt(issue.source_id.replace("github-issue-", ""), 10);
-            if (!isNaN(issueNumber)) {
-              await prisma.gitHubIssue.update({
-                where: { issueNumber },
+        for (const pmIssue of pmIssues) {
+          if (pmIssue.linear_issue_id) {
+            if (pmIssue.source_id.startsWith("group-")) {
+              // Update group export status
+              const groupId = pmIssue.source_id.replace("group-", "");
+              await prisma.group.update({
+                where: { id: groupId },
                 data: {
-                  exportStatus: "exported",
+                  status: "exported",
                   exportedAt: new Date(),
-                  linearIssueId: issue.linear_issue_id,
-                  linearIssueUrl: issue.linear_issue_url || null,
-                  linearIssueIdentifier: issue.linear_issue_identifier || null,
+                  linearIssueId: pmIssue.linear_issue_id,
+                  linearIssueUrl: pmIssue.linear_issue_url || null,
+                  linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
                 },
               });
+            } else if (pmIssue.source_id.startsWith("github-issue-")) {
+              // Update issue export status
+              const issueNumber = parseInt(pmIssue.source_id.replace("github-issue-", ""), 10);
+              if (!isNaN(issueNumber)) {
+                await prisma.gitHubIssue.update({
+                  where: { issueNumber },
+                  data: {
+                    exportStatus: "exported",
+                    exportedAt: new Date(),
+                    linearIssueId: pmIssue.linear_issue_id,
+                    linearIssueUrl: pmIssue.linear_issue_url || null,
+                    linearIssueIdentifier: pmIssue.linear_issue_identifier || null,
+                  },
+                });
+              }
             }
           }
         }
-        log(`Updated ${pmIssues.length} issues with export status in database`);
+        log(`Updated export status in database`);
       } catch (error) {
         logError("Error updating database with export status:", error);
       }
