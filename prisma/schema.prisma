@@ -199,6 +199,9 @@ model GitHubIssue {
   // Thread matching
   matchedToThreads     Boolean  @default(false) @map("matched_to_threads")
   
+  // Feature matching (issue-centric)
+  affectsFeatures      Json     @default("[]") @map("affects_features") // Array of {id, name} objects
+  
   // Export status
   exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
   exportedAt           DateTime? @map("exported_at")

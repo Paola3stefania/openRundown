@@ -2866,24 +2866,56 @@ export async function exportIssuesToPMTool(
     const { prisma } = await import("../storage/db/prisma.js");
 
     // =============================================================
-    // STEP 1: Get GROUPS (each group becomes 1 Linear issue)
+    // STEP 1: Get GROUPS from GitHub issues (each unique groupId becomes 1 Linear issue)
     // =============================================================
-    log("Loading groups from database...");
-    const groups = await prisma.group.findMany({
-      where: channelId ? { channelId } : {},
-      orderBy: { createdAt: 'desc' },
-    });
-    log(`Found ${groups.length} groups`);
-
-    // Get all issues that are in groups
+    log("Loading grouped issues from database...");
+    
+    // Get all issues that have a groupId set (these are our grouped issues)
     const groupedIssues = await prisma.gitHubIssue.findMany({
       where: {
-        inGroup: true,
+        groupId: { not: null },
         ...(includeClosed ? {} : { issueState: "open" }),
       },
       orderBy: { issueNumber: 'desc' },
     });
-    log(`Found ${groupedIssues.length} issues in groups`);
+    log(`Found ${groupedIssues.length} issues with groupId set`);
+
+    // Derive unique groups from the issues
+    const uniqueGroupIds = [...new Set(groupedIssues.map(i => i.groupId).filter((id): id is string => id !== null))];
+    log(`Found ${uniqueGroupIds.length} unique groups from issues`);
+
+    // Load group metadata from Group table (for titles, features, etc.)
+    const groupMetadata = await prisma.group.findMany({
+      where: { id: { in: uniqueGroupIds } },
+    });
+    const groupMetadataMap = new Map(groupMetadata.map(g => [g.id, g]));
+
+    // Build groups array with metadata (or generate defaults if not in Group table)
+    const groups = uniqueGroupIds.map(groupId => {
+      const metadata = groupMetadataMap.get(groupId);
+      const issuesInGroup = groupedIssues.filter(i => i.groupId === groupId);
+      const primaryIssue = issuesInGroup[0];
+      
+      return {
+        id: groupId,
+        channelId: metadata?.channelId || channelId || "",
+        suggestedTitle: metadata?.suggestedTitle || primaryIssue?.issueTitle || `Group ${groupId}`,
+        avgSimilarity: metadata?.avgSimilarity || null,
+        threadCount: metadata?.threadCount || 0,
+        isCrossCutting: metadata?.isCrossCutting || false,
+        status: metadata?.status || "pending",
+        createdAt: metadata?.createdAt || new Date(),
+        updatedAt: metadata?.updatedAt || new Date(),
+        exportedAt: metadata?.exportedAt || null,
+        linearIssueId: metadata?.linearIssueId || null,
+        linearIssueUrl: metadata?.linearIssueUrl || null,
+        linearIssueIdentifier: metadata?.linearIssueIdentifier || null,
+        linearProjectIds: metadata?.linearProjectIds || [],
+        affectsFeatures: metadata?.affectsFeatures || [],
+        githubIssueNumber: metadata?.githubIssueNumber || primaryIssue?.issueNumber || null,
+      };
+    });
+    log(`Built ${groups.length} groups for export`);
 
     // =============================================================
     // STEP 2: Get UNGROUPED ISSUES (each becomes 1 Linear issue)
@@ -2891,7 +2923,7 @@ export async function exportIssuesToPMTool(
     log("Loading ungrouped issues from database...");
     const ungroupedIssues = await prisma.gitHubIssue.findMany({
       where: {
-        inGroup: false,
+        groupId: null, // Issues without a groupId are ungrouped
         ...(includeClosed ? {} : { issueState: "open" }),
       },
       orderBy: { issueNumber: 'desc' },
