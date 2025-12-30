@@ -212,6 +212,12 @@ model GitHubIssue {
   linearIssueUrl       String?  @map("linear_issue_url")
   linearIssueIdentifier String? @map("linear_issue_identifier")
   
+  // Linear sync status
+  linearStatus         String?  @map("linear_status") // 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled'
+  linearStatusSyncedAt DateTime? @map("linear_status_synced_at")
+  closedByPR           String?  @map("closed_by_pr") // PR number/URL that closed this issue
+  closedByPRMergedAt   DateTime? @map("closed_by_pr_merged_at")
+  
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
 
@@ -225,6 +231,8 @@ model GitHubIssue {
   @@index([issueState])
   @@index([groupId])
   @@index([issueAssignees], type: Gin)
+  @@index([linearStatus])
+  @@index([linearIssueId])
   @@map("github_issues")
 }
 

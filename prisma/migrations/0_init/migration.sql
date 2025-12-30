@@ -1,8 +1,3 @@
--- CreateEnumType
-CREATE TYPE IF NOT EXISTS "classified_thread_status" AS ENUM('pending', 'classifying', 'completed', 'failed');
-CREATE TYPE IF NOT EXISTS "group_status" AS ENUM('pending', 'exported');
-CREATE TYPE IF NOT EXISTS "ungrouped_thread_reason" AS ENUM('no_matches', 'below_threshold');
-
 -- CreateTable
 CREATE TABLE IF NOT EXISTS "channels" (
     "id" TEXT NOT NULL,

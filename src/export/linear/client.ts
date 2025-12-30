@@ -661,7 +661,7 @@ export class LinearIntegration extends BasePMTool {
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking
    */
-  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; state: string; projectId?: string; projectName?: string } | null> {
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; projectId?: string; projectName?: string } | null> {
     const query = `
       query GetIssue($id: String!) {
         issue(id: $id) {
@@ -669,6 +669,7 @@ export class LinearIntegration extends BasePMTool {
           identifier
           url
           title
+          description
           state {
             name
           }
@@ -687,6 +688,7 @@ export class LinearIntegration extends BasePMTool {
           identifier: string;
           url: string;
           title: string;
+          description?: string;
           state?: { name: string };
           project?: { id: string; name: string } | null;
         };
@@ -698,6 +700,7 @@ export class LinearIntegration extends BasePMTool {
           identifier: response.data.issue.identifier,
           url: response.data.issue.url,
           title: response.data.issue.title,
+          description: response.data.issue.description,
           state: response.data.issue.state?.name || "Unknown",
           projectId: response.data.issue.project?.id ?? undefined,
           projectName: response.data.issue.project?.name ?? undefined,
@@ -841,6 +844,230 @@ export class LinearIntegration extends BasePMTool {
       logError(`Failed to list Linear team issues for team ${teamId}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Get workflow states for a team
+   * Returns states like "Backlog", "Todo", "In Progress", "Done", "Canceled"
+   */
+  async getWorkflowStates(teamId?: string): Promise<Array<{ id: string; name: string; type: string }>> {
+    const targetTeamId = teamId || this.teamId;
+    if (!targetTeamId) {
+      throw new Error("Team ID is required to get workflow states");
+    }
+
+    const query = `
+      query GetWorkflowStates($teamId: String!) {
+        team(id: $teamId) {
+          states {
+            nodes {
+              id
+              name
+              type
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest<{
+        team?: {
+          states?: {
+            nodes?: Array<{ id: string; name: string; type: string }>;
+          };
+        };
+      }>(query, { teamId: targetTeamId });
+
+      return response.data?.team?.states?.nodes || [];
+    } catch (error) {
+      logError(`Failed to get workflow states for team ${targetTeamId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update issue state (workflow status)
+   * @param issueId - Linear issue ID
+   * @param stateId - Workflow state ID (get from getWorkflowStates)
+   */
+  async updateIssueState(issueId: string, stateId: string): Promise<void> {
+    const query = `
+      mutation UpdateIssueState($id: String!, $stateId: String!) {
+        issueUpdate(id: $id, input: { stateId: $stateId }) {
+          success
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await this.graphqlRequest<{
+      issueUpdate?: {
+        success: boolean;
+        issue?: {
+          id: string;
+          identifier: string;
+          state?: { name: string };
+        };
+      };
+    }>(query, { id: issueId, stateId });
+
+    if (!response.data?.issueUpdate?.success) {
+      throw new Error(`Failed to update Linear issue state: ${JSON.stringify(response.errors)}`);
+    }
+
+    log(`Updated Linear issue ${response.data.issueUpdate.issue?.identifier} to state: ${response.data.issueUpdate.issue?.state?.name}`);
+  }
+
+  /**
+   * Find workflow state by name or type
+   * @param nameOrType - State name ("Done", "In Progress") or type ("completed", "started", "backlog", "canceled")
+   */
+  async findWorkflowState(nameOrType: string, teamId?: string): Promise<{ id: string; name: string; type: string } | null> {
+    const states = await this.getWorkflowStates(teamId);
+    const searchLower = nameOrType.toLowerCase();
+    
+    // First try exact name match
+    const exactMatch = states.find(s => s.name.toLowerCase() === searchLower);
+    if (exactMatch) return exactMatch;
+    
+    // Then try type match
+    const typeMatch = states.find(s => s.type.toLowerCase() === searchLower);
+    if (typeMatch) return typeMatch;
+    
+    // Partial match on name
+    const partialMatch = states.find(s => s.name.toLowerCase().includes(searchLower));
+    if (partialMatch) return partialMatch;
+    
+    return null;
+  }
+
+  /**
+   * Get all issues for team that are NOT in completed/canceled states
+   * Uses pagination to fetch all issues (Linear API max is ~250 per page)
+   */
+  async getOpenIssues(teamId?: string): Promise<Array<{
+    id: string;
+    identifier: string;
+    title: string;
+    description?: string;
+    state: string;
+    stateType: string;
+    url: string;
+  }>> {
+    const targetTeamId = teamId || this.teamId;
+    if (!targetTeamId) {
+      throw new Error("Team ID is required to get open issues");
+    }
+
+    const allIssues: Array<{
+      id: string;
+      identifier: string;
+      title: string;
+      description?: string;
+      url: string;
+      state?: { name: string; type: string };
+    }> = [];
+
+    let hasMore = true;
+    let cursor: string | null = null;
+    const pageSize = 100; // Safe page size for Linear API
+
+    const query = `
+      query GetOpenIssues($teamId: String!, $first: Int!, $after: String) {
+        team(id: $teamId) {
+          issues(first: $first, after: $after) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+              identifier
+              title
+              description
+              url
+              state {
+                name
+                type
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    type IssuesResponse = {
+      team?: {
+        issues?: {
+          pageInfo?: {
+            hasNextPage: boolean;
+            endCursor: string | null;
+          };
+          nodes?: Array<{
+            id: string;
+            identifier: string;
+            title: string;
+            description?: string;
+            url: string;
+            state?: { name: string; type: string };
+          }>;
+        };
+      };
+    };
+
+    while (hasMore) {
+      try {
+        const response: { data?: IssuesResponse; errors?: Array<{ message: string }> } = 
+          await this.graphqlRequest<IssuesResponse>(query, { teamId: targetTeamId, first: pageSize, after: cursor });
+
+        const pageIssues = response.data?.team?.issues?.nodes || [];
+        allIssues.push(...pageIssues);
+
+        const pageInfo = response.data?.team?.issues?.pageInfo;
+        hasMore = pageInfo?.hasNextPage || false;
+        cursor = pageInfo?.endCursor || null;
+
+        if (hasMore) {
+          log(`[Linear] Fetched ${allIssues.length} issues, fetching more...`);
+        }
+      } catch (error) {
+        logError(`Failed to get open issues for team ${targetTeamId}:`, error);
+        throw error;
+      }
+    }
+
+    log(`[Linear] Fetched ${allIssues.length} total issues`);
+    
+    // Filter out completed and canceled states (check both name and type)
+    const openIssues = allIssues.filter(issue => {
+      const stateName = issue.state?.name?.toLowerCase() || "";
+      const stateType = issue.state?.type?.toLowerCase() || "";
+      
+      // Exclude if state is done/completed or canceled
+      const isDone = stateName === "done" || stateType === "completed";
+      const isCanceled = stateName === "canceled" || stateName === "cancelled" || stateType === "canceled";
+      
+      return !isDone && !isCanceled;
+    });
+
+    log(`[Linear] ${openIssues.length} open issues after filtering`);
+    
+    return openIssues.map(issue => ({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description,
+      state: issue.state?.name || "Unknown",
+      stateType: issue.state?.type || "unknown",
+      url: issue.url,
+    }));
   }
 
   private async graphqlRequest<T = Record<string, unknown>>(query: string, variables: Record<string, unknown>): Promise<{ data?: T; errors?: Array<{ message: string }> }> {

@@ -69,7 +69,7 @@ const discord = new Client({
 
 let discordReady = false;
 
-discord.once("ready", () => {
+discord.once("clientReady", () => {
   discordReady = true;
 });
 
@@ -249,24 +249,6 @@ const tools: Tool[] = [
         },
       },
       required: ["query"],
-    },
-  },
-  {
-    name: "setup_github_oauth",
-    description: "Set up GitHub OAuth to automatically generate tokens. Generates OAuth URL and provides setup instructions. Requires GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET to be set.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        client_id: {
-          type: "string",
-          description: "GitHub OAuth Client ID (optional if GITHUB_OAUTH_CLIENT_ID env var is set)",
-        },
-        client_secret: {
-          type: "string",
-          description: "GitHub OAuth Client Secret (optional if GITHUB_OAUTH_CLIENT_SECRET env var is set)",
-        },
-      },
-      required: [],
     },
   },
   {
@@ -601,6 +583,26 @@ const tools: Tool[] = [
         channel_id: {
           type: "string",
           description: "Discord channel ID to match threads from. If not specified, uses all classified threads.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "sync_linear_status",
+    description: "[Issue-centric] Sync GitHub issue states with Linear tickets. Checks if GitHub issues are closed or have merged PRs, then updates Linear ticket status accordingly. One-way sync: GitHub -> Linear. Supports grouped issues (marks Linear as Done only when ALL linked issues are closed).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, show what would be updated without actually changing Linear (default: false)",
+          default: false,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-check all issues including those already marked as 'done'. If false (default), only checks issues not in 'done' state.",
+          default: false,
         },
       },
       required: [],
@@ -1131,82 +1133,6 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case "setup_github_oauth": {
-      const { client_id, client_secret } = args as { client_id?: string; client_secret?: string };
-      
-      const CLIENT_ID = client_id || process.env.GITHUB_OAUTH_CLIENT_ID;
-      const CLIENT_SECRET = client_secret || process.env.GITHUB_OAUTH_CLIENT_SECRET;
-      
-      if (!CLIENT_ID || !CLIENT_SECRET) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                success: false,
-                error: "Missing GitHub OAuth credentials",
-                instructions: [
-                  "1. Go to https://github.com/settings/developers",
-                  "2. Click 'New OAuth App'",
-                  "3. Fill in:",
-                  "   - Application name: 'UnMute MCP'",
-                  "   - Homepage URL: http://localhost:3000",
-                  "   - Authorization callback URL: http://localhost:3000/callback",
-                  "4. Copy the Client ID and Client Secret",
-                  "5. Set environment variables:",
-                  "   export GITHUB_OAUTH_CLIENT_ID='your_client_id'",
-                  "   export GITHUB_OAUTH_CLIENT_SECRET='your_client_secret'",
-                  "6. Or pass them as parameters to this tool",
-                  "",
-                  "Alternatively, run the interactive setup:",
-                  "   npm run github-oauth-setup"
-                ].join("\n"),
-              }, null, 2),
-            },
-          ],
-        };
-      }
-      
-      const PORT = 3000;
-      const REDIRECT_URI = `http://localhost:${PORT}/callback`;
-      const authUrl = `https://github.com/login/oauth/authorize?client_id=${CLIENT_ID}&scope=public_repo&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              message: "GitHub OAuth setup ready",
-              instructions: [
-                "To complete the OAuth flow:",
-                "",
-                "Option 1: Interactive Setup (Recommended)",
-                "  Run: npm run github-oauth-setup",
-                "  This will open your browser and handle everything automatically",
-                "",
-                "Option 2: Manual Setup",
-                `  1. Visit this URL in your browser:`,
-                `     ${authUrl}`,
-                "  2. Authorize the application",
-                "  3. You'll be redirected to localhost:3000/callback with a code",
-                "  4. Exchange the code for a token using the GitHub API",
-                "",
-                "After getting your token, add it to GITHUB_TOKEN:",
-                "  export GITHUB_TOKEN='your_token_here'",
-                "",
-                "Or if you have multiple tokens (for rotation):",
-                "  export GITHUB_TOKEN='token1,token2,token3'"
-              ].join("\n"),
-              auth_url: authUrl,
-              redirect_uri: REDIRECT_URI,
-              scope: "public_repo",
-            }, null, 2),
-          },
-        ],
-      };
-    }
-
     case "fetch_github_issues": {
       const { incremental = false, limit } = args as { incremental?: boolean; limit?: number };
       const config = getConfig();
@@ -1261,65 +1187,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           console.error(`[GitHub Issues] Using provided limit: ${actualLimit}`);
         }
 
-        // Initialize token manager (supports multiple comma-separated tokens)
+        // Initialize token manager (supports multiple comma-separated tokens and GitHub App)
         const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
-        let tokenManager = await GitHubTokenManager.fromEnvironment();
-        
-        // Initialize OAuth client manager (supports multiple comma-separated client IDs)
-        const { OAuthClientManager } = await import("../connectors/github/oauthClientManager.js");
-        const oauthClientManager = OAuthClientManager.fromEnvironment();
-        if (oauthClientManager) {
-          const allClients = oauthClientManager.getAllClients();
-          console.error(`[GitHub Issues] OAuth client manager initialized with ${allClients.length} client(s)`);
-          allClients.forEach((client, index) => {
-            console.error(`[GitHub Issues]   Client ${index + 1}: ${client.clientId.substring(0, 8)}...`);
-          });
-        } else {
-          console.error(`[GitHub Issues] No OAuth client manager configured (GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET not set)`);
-        }
+        const tokenManager = await GitHubTokenManager.fromEnvironment();
         
         if (!tokenManager) {
-          // Try to get token via OAuth if credentials are available
-          if (oauthClientManager) {
-            console.error(`[GitHub Issues] No tokens found. Attempting to get token via OAuth...`);
-            const { getNewTokenViaOAuth } = await import("../connectors/github/oauthFlow.js");
-            
-            // Try each client ID until we get a token or run out of clients
-            let newToken: string | null = null;
-            const allClients = oauthClientManager.getAllClients();
-            let attempts = 0;
-            const maxAttempts = allClients.length;
-            
-            while (!newToken && attempts < maxAttempts) {
-              const client = oauthClientManager.getUnusedClient();
-              if (!client) {
-                break;
-              }
-              
-              try {
-                console.error(`[GitHub Issues] Trying OAuth client ${client.clientId.substring(0, 8)}... (attempt ${attempts + 1}/${maxAttempts})`);
-                newToken = await getNewTokenViaOAuth(client.clientId, client.clientSecret);
-                if (newToken) {
-                  // Create token manager with the new token (in memory only)
-                  tokenManager = new GitHubTokenManager([newToken]);
-                  console.error(`[GitHub Issues] Successfully obtained new token via OAuth (Client ID: ${client.clientId.substring(0, 8)}...)!`);
-                  break;
-                }
-              } catch (oauthError) {
-                console.error(`[GitHub Issues] OAuth flow failed for client ${client.clientId.substring(0, 8)}...: ${oauthError}`);
-                attempts++;
-                // Continue to next client
-              }
-            }
-            
-            if (!newToken && attempts > 0) {
-              console.error(`[GitHub Issues] All ${attempts} OAuth client(s) failed. Please check your OAuth credentials.`);
-            }
-          }
-          
-          if (!tokenManager) {
-            throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (comma-separated for multiple clients) for automatic token generation.");
-          }
+          throw new Error("GITHUB_TOKEN or GitHub App configuration is required. Configure one or both for automatic rate limit rotation. Tokens: GITHUB_TOKEN=token1,token2. GitHub App: GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH.");
         }
         
         const tokenStatus = tokenManager.getStatus();
@@ -2606,49 +2479,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Use token manager for automatic token rotation (same logic as fetch_github_issues)
       const { GitHubTokenManager } = await import("../connectors/github/tokenManager.js");
-      let tokenManager = await GitHubTokenManager.fromEnvironment();
-      
-      // Initialize OAuth client manager (supports multiple comma-separated client IDs)
-      const { OAuthClientManager } = await import("../connectors/github/oauthClientManager.js");
-      const oauthClientManager = OAuthClientManager.fromEnvironment();
+      const tokenManager = await GitHubTokenManager.fromEnvironment();
       
       if (!tokenManager) {
-        // Try to get token via OAuth if credentials are available
-        if (oauthClientManager) {
-          console.error(`[Classification] No tokens found. Attempting to get token via OAuth...`);
-          const { getNewTokenViaOAuth } = await import("../connectors/github/oauthFlow.js");
-          
-          // Try each client ID until we get a token or run out of clients
-          let newToken: string | null = null;
-          const allClients = oauthClientManager.getAllClients();
-          let attempts = 0;
-          const maxAttempts = allClients.length;
-          
-          while (!newToken && attempts < maxAttempts) {
-            const client = oauthClientManager.getUnusedClient();
-            if (!client) {
-              break;
-            }
-            
-            try {
-              console.error(`[Classification] Trying OAuth client ${client.clientId.substring(0, 8)}... (attempt ${attempts + 1}/${maxAttempts})`);
-              newToken = await getNewTokenViaOAuth(client.clientId, client.clientSecret);
-              if (newToken) {
-                // Create token manager with the new token (in memory only)
-                tokenManager = new GitHubTokenManager([newToken]);
-                console.error(`[Classification] Successfully obtained new token via OAuth!`);
-                break;
-              }
-            } catch (oauthError) {
-              console.error(`[Classification] OAuth flow failed: ${oauthError}`);
-              attempts++;
-            }
-          }
-        }
-        
-        if (!tokenManager) {
-          throw new Error("GITHUB_TOKEN environment variable is required. You can provide multiple tokens separated by commas: token1,token2,token3. Or set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET (comma-separated for multiple clients) for automatic token generation.");
-        }
+        throw new Error("GITHUB_TOKEN or GitHub App configuration is required. Configure one or both for automatic rate limit rotation. Tokens: GITHUB_TOKEN=token1,token2. GitHub App: GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH.");
       }
 
       // Pass existing issues to skip fetching them (more efficient)
@@ -7502,6 +7336,74 @@ Example output:
       } catch (error) {
         logError("Issue-thread matching failed:", error);
         throw new Error(`Issue-thread matching failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "sync_linear_status": {
+      const { dry_run = false, force = false } = args as {
+        dry_run?: boolean;
+        force?: boolean;
+      };
+
+      try {
+        const config = getConfig();
+        
+        // Check required environment variables
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required for Linear sync");
+        }
+        
+        if (!process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_TEAM_ID is required for Linear sync");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        console.error(`[Sync] Starting Linear status sync (dry_run: ${dry_run}, force: ${force})...`);
+
+        // Import and run the sync
+        const { syncLinearStatus } = await import("../sync/linearStatusSync.js");
+        const summary = await syncLinearStatus({ dryRun: dry_run, force });
+
+        console.error(`[Sync] Completed: ${summary.markedDone} marked done, ${summary.unchanged} unchanged, ${summary.skippedNoLinks} skipped, ${summary.errors} errors`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: summary.errors === 0,
+              dry_run,
+              message: dry_run 
+                ? `[DRY RUN] Would mark ${summary.markedDone} Linear tickets as Done`
+                : `Marked ${summary.markedDone} Linear tickets as Done`,
+              summary: {
+                total_linear_tickets: summary.totalLinearTickets,
+                marked_done: summary.markedDone,
+                unchanged: summary.unchanged,
+                skipped_no_links: summary.skippedNoLinks,
+                errors: summary.errors,
+              },
+              details: summary.details.slice(0, 50), // Limit details to first 50
+              ...(summary.details.length > 50 && {
+                note: `Showing first 50 of ${summary.details.length} details`,
+              }),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Linear status sync failed:", error);
+        throw new Error(`Linear status sync failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

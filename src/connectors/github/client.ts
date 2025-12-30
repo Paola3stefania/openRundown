@@ -4,7 +4,6 @@
 import { getConfig } from "../../config/index.js";
 import { log } from "../../mcp/logger.js";
 import { GitHubTokenManager } from "./tokenManager.js";
-import type { OAuthClientManager } from "./oauthClientManager.js";
 
 export interface GitHubComment {
   id: number;
@@ -400,15 +399,6 @@ async function batchFetchIssueDetails(
         const status = tokenOrManager.getStatus();
         const nextReset = Math.min(...status.map(s => s.resetIn));
         
-        // Check if OAuth is configured
-        const CLIENT_ID = process.env.GITHUB_OAUTH_CLIENT_ID;
-        const CLIENT_SECRET = process.env.GITHUB_OAUTH_CLIENT_SECRET;
-        
-        if (CLIENT_ID && CLIENT_SECRET) {
-          // Throw a special error that the server can catch to trigger OAuth
-          throw new Error(`RATE_LIMIT_EXHAUSTED_OAUTH_AVAILABLE: All GitHub tokens exhausted. Next reset in ~${nextReset} minutes. OAuth credentials available for automatic token generation.`);
-        }
-        
         throw new Error(`All GitHub tokens exhausted. Next reset in ~${nextReset} minutes.`);
       }
     }
@@ -490,13 +480,16 @@ async function getToken(tokenOrManager: string | GitHubTokenManager | undefined)
 
 /**
  * Helper to create headers with token
+ * @param tokenOrManager - Token string or manager
+ * @param specificToken - If provided, use this specific token instead of getting from manager
  */
-async function createHeaders(tokenOrManager: string | GitHubTokenManager | undefined): Promise<Record<string, string>> {
+async function createHeaders(tokenOrManager: string | GitHubTokenManager | undefined, specificToken?: string): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
   };
   
-  const token = await getToken(tokenOrManager);
+  // Use specific token if provided (e.g., after a switch), otherwise get from manager
+  const token = specificToken || await getToken(tokenOrManager);
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -712,7 +705,7 @@ export async function fetchAllGitHubIssues(
           switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Success - switched to ${nextTokenTypeShort} token`;
           console.error(`[GitHub] Successfully switched from ${currentTokenTypeName} token to ${nextTokenTypeName}`);
           console.error(`[GitHub] Rate limit hit, rotating to next token...`);
-          headers = await createHeaders(tokenOrManager); // Refresh headers with new token
+          headers = await createHeaders(tokenOrManager, nextToken); // Use the specific new token
           // Retry the same request with new token
           const retryResponse = await fetch(url, { headers });
           
@@ -948,7 +941,7 @@ export async function fetchAllGitHubIssues(
             switchInfo = `\n  Switch attempted: Yes (from ${currentTokenTypeName} token)\n  Switch result: Success - switched to ${nextTokenTypeShort} token`;
             console.error(`[GitHub] Successfully switched from ${currentTokenTypeName} token to ${nextTokenTypeName}`);
             console.error(`[GitHub] Rate limit hit, rotating to next token...`);
-            headers = await createHeaders(tokenOrManager); // Refresh headers with new token
+            headers = await createHeaders(tokenOrManager, nextToken); // Use the specific new token
             // Retry the same request with new token
             const retryResponse = await fetch(url, { headers });
             
