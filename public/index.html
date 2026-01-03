@@ -14,13 +14,6 @@
             color: #333;
         }
         h1 { color: #0070f3; }
-        .endpoint {
-            background: #f5f5f5;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 5px;
-            border-left: 3px solid #0070f3;
-        }
         code {
             background: #f0f0f0;
             padding: 2px 6px;
@@ -32,40 +25,6 @@
 <body>
     <h1>UNMute API</h1>
     <p>This is a serverless API project. All endpoints are under <code>/api/</code>.</p>
-    
-    <h2>Available Endpoints</h2>
-    
-    <div class="endpoint">
-        <strong>GET/POST</strong> <code>/api/cron/daily-sync</code>
-        <p>Automated daily sync (requires CRON_SECRET authentication)</p>
-    </div>
-    
-    <div class="endpoint">
-        <strong>POST</strong> <code>/api/tools/tool</code>
-        <p>Generic tool execution endpoint</p>
-    </div>
-    
-    <div class="endpoint">
-        <strong>POST</strong> <code>/api/tools/sync</code>
-        <p>Manual sync endpoint</p>
-    </div>
-    
-    <div class="endpoint">
-        <strong>POST</strong> <code>/api/tools/export</code>
-        <p>Manual export endpoint</p>
-    </div>
-    
-    <div class="endpoint">
-        <strong>GET</strong> <code>/api/tools/status</code>
-        <p>Status and statistics endpoint</p>
-    </div>
-    
-    <div class="endpoint">
-        <strong>POST</strong> <code>/api/tools/migrate</code>
-        <p>Run database migrations (use if tables are missing)</p>
-    </div>
-    
-    <p><em>All endpoints require authentication via <code>Authorization: Bearer &lt;API_KEY&gt;</code> header.</em></p>
 </body>
 </html>
 
