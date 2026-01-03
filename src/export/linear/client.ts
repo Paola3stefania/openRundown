@@ -661,7 +661,7 @@ export class LinearIntegration extends BasePMTool {
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking
    */
-  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; projectId?: string; projectName?: string } | null> {
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string } | null> {
     const query = `
       query GetIssue($id: String!) {
         issue(id: $id) {
@@ -671,7 +671,11 @@ export class LinearIntegration extends BasePMTool {
           title
           description
           state {
+            id
             name
+          }
+          assignee {
+            id
           }
           project {
             id
@@ -689,7 +693,8 @@ export class LinearIntegration extends BasePMTool {
           url: string;
           title: string;
           description?: string;
-          state?: { name: string };
+          state?: { id: string; name: string };
+          assignee?: { id: string } | null;
           project?: { id: string; name: string } | null;
         };
       }>(query, { id: issueId });
@@ -702,6 +707,8 @@ export class LinearIntegration extends BasePMTool {
           title: response.data.issue.title,
           description: response.data.issue.description,
           state: response.data.issue.state?.name || "Unknown",
+          stateId: response.data.issue.state?.id,
+          assigneeId: response.data.issue.assignee?.id,
           projectId: response.data.issue.project?.id ?? undefined,
           projectName: response.data.issue.project?.name ?? undefined,
         };

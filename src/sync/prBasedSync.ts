@@ -334,11 +334,14 @@ export async function checkAndSetInProgressForOpenPRs(
     };
   }
 
+  // Only return updated=true if an actual update occurred
   return {
-    updated: true,
-    reason: dryRun
-      ? `[DRY RUN] Found ${openPRsFiltered.length} open PR(s), would assign to ${assignResult.linearUserId}`
-      : `Found ${openPRsFiltered.length} open PR(s), assigned to user`,
+    updated: assignResult.updated,
+    reason: assignResult.updated
+      ? (dryRun
+          ? `[DRY RUN] Found ${openPRsFiltered.length} open PR(s), would assign to ${assignResult.linearUserId}`
+          : `Found ${openPRsFiltered.length} open PR(s), assigned to user`)
+      : assignResult.reason,
     prAuthor,
     linearUserId: assignResult.linearUserId,
   };
@@ -361,7 +364,7 @@ export async function setLinearIssueInProgressAndAssign(
   defaultAssigneeId: string | undefined,
   dryRun: boolean,
   identifier?: string
-): Promise<{ success: boolean; linearUserId?: string; reason: string }> {
+): Promise<{ success: boolean; updated: boolean; linearUserId?: string; reason: string }> {
   const linearUserId = findLinearUserId(
     prAuthor,
     userMappings,
@@ -373,10 +376,42 @@ export async function setLinearIssueInProgressAndAssign(
     const isOrganizationEngineer = organizationEngineers.has(prAuthor.toLowerCase());
     return {
       success: false,
+      updated: false,
       reason: isOrganizationEngineer
         ? `No user mapping found for organization engineer: ${prAuthor}`
         : `PR author ${prAuthor} is not an organization engineer`,
     };
+  }
+
+  // Check current Linear issue state and assignee before updating
+  const currentIssue = await linear.getIssue(linearIssueId);
+  if (currentIssue) {
+    const isAlreadyInProgress = currentIssue.stateId === inProgressStateId;
+    const isAlreadyAssigned = currentIssue.assigneeId === linearUserId;
+
+    if (isAlreadyInProgress && isAlreadyAssigned) {
+      // Already in correct state - no update needed
+      const logIdentifier = identifier || linearIssueId;
+      log(`[Sync] ${logIdentifier}: Already in In Progress state and assigned to ${linearUserId}, skipping update`);
+      
+      // Still update DB sync timestamp to indicate we checked it
+      if (!dryRun) {
+        await prisma.gitHubIssue.updateMany({
+          where: { issueNumber: { in: issueNumbers } },
+          data: {
+            linearStatus: LINEAR_STATUS.IN_PROGRESS,
+            linearStatusSyncedAt: new Date(),
+          },
+        });
+      }
+
+      return {
+        success: true,
+        updated: false,
+        linearUserId,
+        reason: "Already in correct state and assigned",
+      };
+    }
   }
 
   if (!dryRun) {
@@ -402,6 +437,7 @@ export async function setLinearIssueInProgressAndAssign(
 
   return {
     success: true,
+    updated: true,
     linearUserId,
     reason: dryRun
       ? `[DRY RUN] Would assign to ${linearUserId}`
@@ -593,26 +629,14 @@ async function processIssueWithPRs(
       linearIssueIdentifier || `#${issueNumber}`
     );
 
-    if (!result.updated) {
-      // Update failed - return skipped status
-      return {
-        issueNumber,
-        linearIdentifier: linearIssueIdentifier || undefined,
-        action: SYNC_ACTIONS.SKIPPED,
-        reason: result.reason,
-        openPRs: openPRs.map(pr => ({
-          number: pr.number,
-          url: pr.html_url,
-          author: pr.user.login,
-        })),
-      };
-    }
+    // If updated is false, it means the issue is already in the correct state (unchanged)
+    // If updated is true, it means we actually updated the Linear issue
+    const action = result.updated ? SYNC_ACTIONS.UPDATED : SYNC_ACTIONS.UNCHANGED;
 
-    // Successfully updated
     return {
       issueNumber,
       linearIdentifier: linearIssueIdentifier || undefined,
-      action: SYNC_ACTIONS.UPDATED,
+      action,
       reason: result.reason,
       openPRs: openPRs.map(pr => ({
         number: pr.number,
