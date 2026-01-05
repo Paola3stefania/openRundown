@@ -666,9 +666,12 @@ export async function computeAndSaveFeatureEmbeddings(
         }
       }
       
-      // Also check ungrouped issues that matched to this feature
+      // Also check ungrouped issues that matched to this feature (inferred from GitHubIssue where groupId is null)
       try {
-        const allUngroupedIssues = await prisma.ungroupedIssue.findMany({
+        const allUngroupedIssues = await prisma.gitHubIssue.findMany({
+          where: {
+            groupId: null, // inGroup is redundant - groupId null = not in group
+          },
           select: {
             issueTitle: true,
             issueBody: true,
@@ -1921,4 +1924,190 @@ export async function computeAllEmbeddings(
   }
 
   console.error("[Embeddings] Completed all embedding computations");
+}
+
+/**
+ * Compute and save embeddings for database groups
+ * Groups are represented by their title and the aggregated content of their GitHub issues
+ */
+export async function computeAndSaveGroupEmbeddings(
+  apiKey: string,
+  onProgress?: (processed: number, total: number) => void,
+  force: boolean = false
+): Promise<{ computed: number; cached: number; total: number }> {
+  const model = getEmbeddingModel();
+
+  // If force=true, delete all existing embeddings first to ensure clean recomputation
+  if (force) {
+    console.error(`[Embeddings] Force mode: Deleting all existing group embeddings...`);
+    const deletedCount = await prisma.groupEmbedding.deleteMany({
+      where: { model },
+    });
+    console.error(`[Embeddings] Deleted ${deletedCount.count} existing group embeddings`);
+  }
+
+  // Get all groups with their GitHub issues
+  const allGroups = await prisma.group.findMany({
+    include: {
+      githubIssues: {
+        select: {
+          issueNumber: true,
+          issueTitle: true,
+          issueBody: true,
+          issueLabels: true,
+        },
+      },
+    },
+    orderBy: { id: "asc" },
+  });
+
+  // Check which groups already have embeddings (skip if force=true)
+  const existingHashes = new Map<string, string>();
+  if (!force) {
+    const existingEmbeddings = await prisma.groupEmbedding.findMany({
+      where: { model },
+      select: {
+        groupId: true,
+        contentHash: true,
+      },
+    });
+
+    for (const row of existingEmbeddings) {
+      existingHashes.set(row.groupId, row.contentHash);
+    }
+  }
+
+  // Compute content hashes and find groups that need embeddings
+  const groupsToEmbed: Array<{ groupId: string; content: string }> = [];
+  for (const group of allGroups) {
+    // Build group text from title and all issues in the group
+    const groupTextParts: string[] = [];
+    
+    // Add group title
+    if (group.suggestedTitle) {
+      groupTextParts.push(group.suggestedTitle);
+    }
+    
+    // Add all issue titles and bodies from the group
+    for (const issue of group.githubIssues) {
+      if (issue.issueTitle) {
+        groupTextParts.push(issue.issueTitle);
+      }
+      if (issue.issueBody) {
+        // Include first 500 chars of body to keep it manageable
+        const bodyExcerpt = issue.issueBody.length > 500 
+          ? issue.issueBody.substring(0, 500) + "..."
+          : issue.issueBody;
+        groupTextParts.push(bodyExcerpt);
+      }
+      if (issue.issueLabels && issue.issueLabels.length > 0) {
+        groupTextParts.push(`Labels: ${issue.issueLabels.join(", ")}`);
+      }
+    }
+    
+    const groupText = groupTextParts.join("\n\n");
+    
+    const currentHash = hashContent(groupText);
+    const existingHash = existingHashes.get(group.id);
+
+    // If force=true, recompute all. Otherwise, only compute if missing or changed
+    if (force || !existingHash || existingHash !== currentHash) {
+      groupsToEmbed.push({
+        groupId: group.id,
+        content: groupText,
+      });
+    }
+  }
+
+  console.error(`[Embeddings] Found ${allGroups.length} groups, ${groupsToEmbed.length} need embeddings`);
+
+  if (groupsToEmbed.length === 0) {
+    return { computed: 0, cached: allGroups.length, total: allGroups.length };
+  }
+
+  // Process in batches using batch embedding API
+  const batchSize = 50;
+  let processed = 0;
+  let cached = allGroups.length - groupsToEmbed.length;
+  let retryCount = 0;
+
+  for (let i = 0; i < groupsToEmbed.length; i += batchSize) {
+    const batch = groupsToEmbed.slice(i, i + batchSize);
+
+    try {
+      // Prepare texts for batch embedding
+      const textsToEmbed = batch.map((group) => group.content);
+
+      // Batch create embeddings
+      console.error(`[Embeddings] Computing embeddings for batch ${Math.floor(i / batchSize) + 1} (${batch.length} groups)...`);
+      const embeddings = await createEmbeddings(textsToEmbed, apiKey);
+      console.error(`[Embeddings] Successfully computed ${embeddings.length} group embeddings`);
+
+      // Batch save all embeddings in a single transaction
+      await prisma.$transaction(async (tx: Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">) => {
+        await Promise.all(
+          embeddings.map((embedding, j) => {
+            const group = batch[j];
+            const contentText = textsToEmbed[j];
+            const contentHash = hashContent(contentText);
+            return tx.groupEmbedding.upsert({
+              where: { groupId: group.groupId },
+              update: {
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+              create: {
+                groupId: group.groupId,
+                embedding: embedding as Prisma.InputJsonValue,
+                contentHash,
+                model,
+              },
+            });
+          })
+        );
+      });
+
+      processed += batch.length;
+      retryCount = 0; // Reset retry count on successful batch
+      if (onProgress) {
+        onProgress(processed, groupsToEmbed.length);
+      }
+    } catch (error) {
+      // If batch fails, fall back to individual processing
+      const isRateLimit = error instanceof Error && (error.message.includes("429") || error.message.includes("rate limit"));
+      if (isRateLimit) {
+        // Exponential backoff for rate limit errors: 1s, 2s, 4s, etc.
+        retryCount++;
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
+        console.error(`[Embeddings] Rate limit error (retry ${retryCount}), waiting ${delay}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // Retry the batch instead of falling back to individual
+        i -= batchSize; // Rewind to retry this batch
+        continue;
+      }
+      
+      retryCount = 0; // Reset retry count for non-rate-limit errors
+      
+      console.error(`[Embeddings] Batch embedding failed, falling back to individual:`, error);
+      for (const group of batch) {
+        try {
+          const embedding = await createEmbedding(group.content, apiKey);
+          const contentHash = hashContent(group.content);
+
+          await saveGroupEmbedding(group.groupId, embedding, contentHash);
+          
+          processed++;
+          if (onProgress) {
+            onProgress(processed, groupsToEmbed.length);
+          }
+        } catch (individualError) {
+          console.error(`[Embeddings] Failed to create embedding for group ${group.groupId}: ${individualError instanceof Error ? individualError.message : String(individualError)}`);
+        }
+      }
+    }
+  }
+
+  console.error(`[Embeddings] Group embeddings: ${processed} computed, ${cached} cached`);
+  return { computed: processed, cached, total: allGroups.length };
 }

@@ -193,8 +193,7 @@ model GitHubIssue {
   issueReactions       Json?    @map("issue_reactions") // Reactions object
   
   // Group tracking
-  inGroup              Boolean  @default(false) @map("in_group")
-  groupId              String?  @map("group_id") // FK to groups table
+  groupId              String?  @map("group_id") // FK to groups table (inGroup is redundant - groupId null = not in group)
   
   // Thread matching
   matchedToThreads     Boolean  @default(false) @map("matched_to_threads")
@@ -226,7 +225,6 @@ model GitHubIssue {
   threadMatches        IssueThreadMatch[] // Issue-centered thread matches
   pullRequests         GitHubPullRequest[] // PRs that reference this issue
 
-  @@index([inGroup])
   @@index([matchedToThreads])
   @@index([exportStatus])
   @@index([issueState])

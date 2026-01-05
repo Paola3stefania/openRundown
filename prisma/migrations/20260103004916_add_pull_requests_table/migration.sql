@@ -50,3 +50,5 @@ ALTER TABLE "_GitHubIssueToGitHubPullRequest" ADD CONSTRAINT "_GitHubIssueToGitH
 ALTER TABLE "github_issues" DROP COLUMN IF EXISTS "open_prs";
 
 
+
+

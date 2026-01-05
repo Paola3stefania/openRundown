@@ -1290,9 +1290,10 @@ export class DatabaseStorage implements IStorage {
     in_group?: boolean;
     matched_to_threads?: boolean;
   }>> {
-    const where: { inGroup?: boolean; matchedToThreads?: boolean; issueState?: string } = {};
+    const where: { groupId?: string | null; matchedToThreads?: boolean; issueState?: string } = {};
     if (options?.inGroup !== undefined) {
-      where.inGroup = options.inGroup;
+      // inGroup is redundant - use groupId instead: true = groupId IS NOT NULL, false = groupId IS NULL
+      where.groupId = options.inGroup ? { not: null } : null;
     }
     if (options?.matchedToThreads !== undefined) {
       where.matchedToThreads = options.matchedToThreads;
@@ -1316,7 +1317,7 @@ export class DatabaseStorage implements IStorage {
       author: issue.issueAuthor ?? undefined,
       created_at: issue.issueCreatedAt?.toISOString(),
       updated_at: issue.issueUpdatedAt?.toISOString(),
-      in_group: issue.inGroup,
+      in_group: issue.groupId !== null, // Derive from groupId (inGroup column is redundant)
       matched_to_threads: issue.matchedToThreads,
     }));
   }

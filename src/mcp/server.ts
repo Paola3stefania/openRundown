@@ -532,6 +532,50 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "match_database_groups_to_features",
+    description: "[Issue-centric] Match database groups to product features using semantic similarity (embeddings). Updates the affectsFeatures field in the groups table. Groups are matched based on their aggregated content (title + all issues in the group). Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold for feature matching (0.0-1.0 scale, default 0.5)",
+          minimum: 0,
+          maximum: 1,
+          default: 0.5,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-match all groups even if they already have affectsFeatures set. If false (default), only match groups without features.",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "match_ungrouped_issues_to_features",
+    description: "[Issue-centric] Match ungrouped issues to product features using semantic similarity (embeddings). Updates the affectsFeatures field in the github_issues table. Ungrouped issues are inferred from GitHubIssue table where groupId is null (issues that weren't grouped during grouping). They reuse embeddings from the github_issues table. Requires OPENAI_API_KEY.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        min_similarity: {
+          type: "number",
+          description: "Minimum similarity threshold for feature matching (0.0-1.0 scale, default 0.5)",
+          minimum: 0,
+          maximum: 1,
+          default: 0.5,
+        },
+        force: {
+          type: "boolean",
+          description: "If true, re-match all ungrouped issues even if they already have affectsFeatures set. If false (default), only match issues without features.",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "match_issues_to_features",
     description: "[Issue-centric] Match GitHub issues to product features using semantic similarity (embeddings). Updates the affectsFeatures field in the github_issues table. This is for the issue-centric flow where GitHub issues are primary. Requires OPENAI_API_KEY.",
     inputSchema: {
@@ -3802,7 +3846,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             for (const issueNum of group) {
               await prisma.gitHubIssue.update({
                 where: { issueNumber: issueNum },
-                data: { inGroup: true, groupId },
+                data: { groupId }, // inGroup is redundant - groupId not null = in group
               });
             }
 
@@ -3960,26 +4004,33 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
 
         // =====================================================================
-        // STEP 7: Match issues to features (incremental - embeddings)
+        // STEP 7: Match to features (incremental - embeddings)
+        // Order: 1) Ungrouped issues first, 2) Then groups
         // =====================================================================
-        console.error("[Sync] Step 7: Matching issues to features...");
+        console.error("[Sync] Step 7: Matching to features (ungrouped issues first, then groups)...");
         
-        const unmatchedToFeatures = await prisma.gitHubIssue.findMany({
-          where: { issueState: "open", affectsFeatures: { equals: [] } },
+        // STEP 7a: Match ungrouped issues to features first
+        console.error("[Sync] Step 7a: Matching ungrouped issues to features...");
+        const unmatchedUngroupedIssues = await prisma.gitHubIssue.findMany({
+          where: { 
+            issueState: "open", 
+            groupId: null, // Ungrouped issues
+            affectsFeatures: { equals: [] },
+          },
           select: { issueNumber: true },
           take: 50,
         });
 
-        let featuresMatched = 0;
+        let ungroupedFeaturesMatched = 0;
 
-        if (unmatchedToFeatures.length > 0) {
+        if (unmatchedUngroupedIssues.length > 0) {
           const features = await prisma.feature.findMany({
             include: { embedding: true },
           });
 
           if (features.length > 0) {
             const issueEmbs = await prisma.issueEmbedding.findMany({
-              where: { issueNumber: { in: unmatchedToFeatures.map(i => i.issueNumber) } },
+              where: { issueNumber: { in: unmatchedUngroupedIssues.map(i => i.issueNumber) } },
             });
 
             for (const issueEmb of issueEmbs) {
@@ -4000,16 +4051,75 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   where: { issueNumber: issueEmb.issueNumber },
                   data: { affectsFeatures: matchedFeatures },
                 });
-                featuresMatched++;
+                ungroupedFeaturesMatched++;
               }
             }
           }
         }
 
+        // STEP 7b: Match grouped issues to features (issues that are in groups)
+        console.error("[Sync] Step 7b: Matching grouped issues to features...");
+        const unmatchedGroupedIssues = await prisma.gitHubIssue.findMany({
+          where: { 
+            issueState: "open", 
+            groupId: { not: null }, // Issues in groups
+            affectsFeatures: { equals: [] },
+          },
+          select: { issueNumber: true },
+          take: 50,
+        });
+
+        let groupedIssuesFeaturesMatched = 0;
+
+        if (unmatchedGroupedIssues.length > 0) {
+          const features = await prisma.feature.findMany({
+            include: { embedding: true },
+          });
+
+          if (features.length > 0) {
+            const issueEmbs = await prisma.issueEmbedding.findMany({
+              where: { issueNumber: { in: unmatchedGroupedIssues.map(i => i.issueNumber) } },
+            });
+
+            for (const issueEmb of issueEmbs) {
+              const issueVec = issueEmb.embedding as number[];
+              const matchedFeatures: Array<{ id: string; name: string }> = [];
+
+              for (const feature of features) {
+                if (!feature.embedding) continue;
+                const featureVec = feature.embedding.embedding as number[];
+                const sim = cosineSimilarity(issueVec, featureVec);
+                if (sim >= 0.5) {
+                  matchedFeatures.push({ id: feature.id, name: feature.name });
+                }
+              }
+
+              if (matchedFeatures.length > 0) {
+                await prisma.gitHubIssue.update({
+                  where: { issueNumber: issueEmb.issueNumber },
+                  data: { affectsFeatures: matchedFeatures },
+                });
+                groupedIssuesFeaturesMatched++;
+              }
+            }
+          }
+        }
+
+        // STEP 7c: Match groups to features (group-level matching)
+        // Note: Groups are matched separately using match_database_groups_to_features tool
+        // This ensures groups get their own features based on aggregated content
+        console.error("[Sync] Step 7c: Groups should be matched separately using match_database_groups_to_features tool");
+
         results.steps.push({
           step: "match_features",
           status: "success",
-          result: { issues_checked: unmatchedToFeatures.length, issues_matched: featuresMatched },
+          result: { 
+            ungrouped_issues_checked: unmatchedUngroupedIssues.length, 
+            ungrouped_issues_matched: ungroupedFeaturesMatched,
+            grouped_issues_checked: unmatchedGroupedIssues.length,
+            grouped_issues_matched: groupedIssuesFeaturesMatched,
+            note: "Groups should be matched separately using match_database_groups_to_features tool",
+          },
         });
 
         // =====================================================================
@@ -4128,7 +4238,11 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           grouping: { groups_created: groupsCreated, issues_grouped: issuesGrouped },
           thread_matching: { matches_created: matchesCreated },
           labeling: { issues_labeled: issuesLabeled },
-          feature_matching: { issues_matched: featuresMatched },
+          feature_matching: { 
+            ungrouped_issues_matched: ungroupedFeaturesMatched,
+            grouped_issues_matched: groupedIssuesFeaturesMatched,
+            total_issues_matched: ungroupedFeaturesMatched + groupedIssuesFeaturesMatched,
+          },
           export: { issues_exported: issuesExported, skipped: exportSkipped },
           linear_sync: { tickets_marked_done: ticketsMarkedDone },
         };
@@ -6424,17 +6538,17 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           });
 
-          // Update issues to mark them as grouped
+          // Update issues to mark them as grouped (inGroup is redundant - groupId not null = in group)
           await prisma.gitHubIssue.updateMany({
             where: { issueNumber: { in: group.issues } },
-            data: { inGroup: true, groupId: group.id },
+            data: { groupId: group.id },
           });
         }
 
-        // Mark ungrouped issues
+        // Mark ungrouped issues (inGroup is redundant - groupId null = not in group)
         await prisma.gitHubIssue.updateMany({
           where: { issueNumber: { in: ungroupedIssues } },
-          data: { inGroup: false, groupId: null },
+          data: { groupId: null },
         });
 
         console.error(`[GroupIssues] Saved ${groups.length} groups to database`);
@@ -7396,6 +7510,539 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (error) {
         logError("Issue feature matching failed:", error);
         throw new Error(`Issue feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "match_ungrouped_issues_to_features": {
+      const {
+        min_similarity = 0.5,
+        force = false,
+      } = args as {
+        min_similarity?: number;
+        force?: boolean;
+      };
+
+      try {
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error("OPENAI_API_KEY is required for ungrouped issue feature matching.");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for ungrouped issue feature matching. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        // STEP 1: Load features from database
+        console.error(`[Ungrouped Issue Feature Matching] Loading features from database...`);
+        const dbFeatures = await prisma.feature.findMany({
+          include: {
+            embedding: true,
+          },
+        });
+        console.error(`[Ungrouped Issue Feature Matching] Found ${dbFeatures.length} features`);
+
+        if (dbFeatures.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: "No features found in database. Run extract_features first to extract features from documentation.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 2: Load ungrouped issues from database (inferred from GitHubIssue table where groupId is null)
+        console.error(`[Ungrouped Issue Feature Matching] Loading ungrouped issues from database...`);
+        const allDbUngroupedIssues = await prisma.gitHubIssue.findMany({
+          where: { 
+            groupId: null, // Issues not in any group (inGroup is redundant - groupId null = not in group)
+          },
+          select: {
+            issueNumber: true,
+            issueTitle: true,
+            issueBody: true,
+            issueLabels: true,
+            affectsFeatures: true,
+          },
+        });
+        
+        // Filter based on force flag - if not force, only match issues without features
+        const allUngroupedIssues = force 
+          ? allDbUngroupedIssues 
+          : allDbUngroupedIssues.filter(issue => {
+              const features = issue.affectsFeatures as unknown[];
+              return !features || !Array.isArray(features) || features.length === 0;
+            });
+        console.error(`[Ungrouped Issue Feature Matching] Found ${allUngroupedIssues.length} ungrouped issues to match (${allDbUngroupedIssues.length} total, force=${force})`);
+
+        if (allUngroupedIssues.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: force 
+                  ? "No ungrouped issues found in database. Run group_github_issues first."
+                  : "All ungrouped issues already have features matched. Use force=true to re-match.",
+                stats: { total_issues: 0, matched: 0, skipped: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 3: Ensure issue embeddings exist (ungrouped issues can reuse embeddings from GitHubIssue table)
+        console.error(`[Ungrouped Issue Feature Matching] Ensuring issue embeddings exist...`);
+        const { computeAndSaveIssueEmbeddings } = await import("../storage/db/embeddings.js");
+        await computeAndSaveIssueEmbeddings(process.env.OPENAI_API_KEY, undefined, false);
+
+        // STEP 4: Load feature embeddings (compute if missing)
+        console.error(`[Ungrouped Issue Feature Matching] Loading feature embeddings...`);
+        const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
+        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        
+        // Reload features with embeddings
+        const featuresWithEmbeddings = await prisma.feature.findMany({
+          include: { embedding: true },
+        });
+        
+        // Build feature embedding map
+        const featureEmbeddingMap = new Map<string, number[]>();
+        for (const feature of featuresWithEmbeddings) {
+          if (feature.embedding?.embedding) {
+            featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
+          }
+        }
+        console.error(`[Ungrouped Issue Feature Matching] Loaded ${featureEmbeddingMap.size} feature embeddings`);
+
+        // STEP 5: Load code-to-feature mappings for additional matching
+        console.error(`[Ungrouped Issue Feature Matching] Loading code-to-feature mappings...`);
+        const codeFeatureMappings = await prisma.featureCodeMapping.findMany({
+          select: {
+            featureId: true,
+            similarity: true,
+          },
+        });
+        
+        // Build map of feature -> max code similarity
+        const codeToFeatureMap = new Map<string, number>();
+        for (const mapping of codeFeatureMappings) {
+          const current = codeToFeatureMap.get(mapping.featureId) || 0;
+          const similarity = Number(mapping.similarity);
+          if (similarity > current) {
+            codeToFeatureMap.set(mapping.featureId, similarity);
+          }
+        }
+        console.error(`[Ungrouped Issue Feature Matching] Found code mappings for ${codeToFeatureMap.size} features`);
+
+        // Cosine similarity function
+        const cosineSimilarity = (a: number[], b: number[]): number => {
+          let dotProduct = 0;
+          let normA = 0;
+          let normB = 0;
+          for (let i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+          }
+          return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        };
+
+        // STEP 6: Match each ungrouped issue to features
+        console.error(`[Ungrouped Issue Feature Matching] Matching ${allUngroupedIssues.length} ungrouped issues to features...`);
+        let matchedCount = 0;
+        let skippedCount = 0;
+        const matchResults: Array<{ issueNumber: number; features: Array<{ id: string; name: string; similarity: number }> }> = [];
+
+        // Load issue embeddings (ungrouped issues reuse embeddings from IssueEmbedding table)
+        const issueEmbeddings = await prisma.issueEmbedding.findMany({
+          where: { issueNumber: { in: allUngroupedIssues.map(i => i.issueNumber) } },
+        });
+        const issueEmbeddingMap = new Map<number, number[]>();
+        for (const emb of issueEmbeddings) {
+          issueEmbeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+        }
+
+        for (const issue of allUngroupedIssues) {
+          const issueEmb = issueEmbeddingMap.get(issue.issueNumber);
+          
+          if (!issueEmb) {
+            console.error(`[Ungrouped Issue Feature Matching] No embedding for ungrouped issue #${issue.issueNumber}, skipping`);
+            skippedCount++;
+            continue;
+          }
+
+          // Calculate similarity to each feature
+          const featureMatches: Array<{ id: string; name: string; similarity: number; codeBoosted: boolean }> = [];
+
+          for (const feature of featuresWithEmbeddings) {
+            const featureEmb = featureEmbeddingMap.get(feature.id);
+            if (!featureEmb) continue;
+
+            let similarity = cosineSimilarity(issueEmb, featureEmb);
+            let codeBoosted = false;
+
+            // Boost with code similarity if available
+            const codeSimilarity = codeToFeatureMap.get(feature.id);
+            if (codeSimilarity && codeSimilarity > 0.5) {
+              // Blend semantic and code similarities
+              similarity = Math.max(similarity, similarity * 0.7 + codeSimilarity * 0.3);
+              codeBoosted = true;
+            }
+
+            if (similarity >= min_similarity) {
+              featureMatches.push({
+                id: feature.id,
+                name: feature.name,
+                similarity,
+                codeBoosted,
+              });
+            }
+          }
+
+          // Sort by similarity and take top 5
+          featureMatches.sort((a, b) => b.similarity - a.similarity);
+          const topFeatures = featureMatches.slice(0, 5);
+
+          // Default to "General" if no matches
+          const affectsFeatures = topFeatures.length > 0
+            ? topFeatures.map(f => ({ id: f.id, name: f.name }))
+            : [{ id: "general", name: "General" }];
+
+          // Update ungrouped issue in database (using GitHubIssue table)
+          await prisma.gitHubIssue.update({
+            where: { issueNumber: issue.issueNumber },
+            data: {
+              affectsFeatures: affectsFeatures,
+            },
+          });
+
+          matchedCount++;
+          matchResults.push({
+            issueNumber: issue.issueNumber,
+            features: topFeatures.map(f => ({ id: f.id, name: f.name, similarity: Math.round(f.similarity * 100) / 100 })),
+          });
+
+          // Log progress every 50 issues
+          if (matchedCount % 50 === 0) {
+            console.error(`[Ungrouped Issue Feature Matching] Matched ${matchedCount}/${allUngroupedIssues.length} issues...`);
+          }
+        }
+
+        console.error(`[Ungrouped Issue Feature Matching] Completed: ${matchedCount} matched, ${skippedCount} skipped`);
+
+        // Build summary by feature
+        const featureSummary = new Map<string, number>();
+        for (const result of matchResults) {
+          for (const feature of result.features) {
+            featureSummary.set(feature.name, (featureSummary.get(feature.name) || 0) + 1);
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Matched ${matchedCount} ungrouped issues to features`,
+              stats: {
+                total_issues: allUngroupedIssues.length,
+                matched: matchedCount,
+                skipped: skippedCount,
+                features_used: featureSummary.size,
+              },
+              feature_distribution: Object.fromEntries(
+                [...featureSummary.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)
+              ),
+              sample_matches: matchResults.slice(0, 10).map(r => ({
+                issue: r.issueNumber,
+                top_feature: r.features[0]?.name || "General",
+                similarity: r.features[0]?.similarity || 0,
+              })),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Ungrouped issue feature matching failed:", error);
+        throw new Error(`Ungrouped issue feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "match_database_groups_to_features": {
+      const {
+        min_similarity = 0.5,
+        force = false,
+      } = args as {
+        min_similarity?: number;
+        force?: boolean;
+      };
+
+      try {
+        if (!process.env.OPENAI_API_KEY) {
+          throw new Error("OPENAI_API_KEY is required for group feature matching.");
+        }
+
+        // Verify database is available
+        const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for group feature matching. Please configure DATABASE_URL.");
+        }
+
+        const storage = getStorage();
+        const dbAvailable = await storage.isAvailable();
+        if (!dbAvailable) {
+          throw new Error("Database is not available. Please check your DATABASE_URL configuration.");
+        }
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        // STEP 1: Load features from database
+        console.error(`[Group Feature Matching] Loading features from database...`);
+        const dbFeatures = await prisma.feature.findMany({
+          include: {
+            embedding: true,
+          },
+        });
+        console.error(`[Group Feature Matching] Found ${dbFeatures.length} features`);
+
+        if (dbFeatures.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: "No features found in database. Run extract_features first to extract features from documentation.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 2: Load groups from database
+        console.error(`[Group Feature Matching] Loading groups from database...`);
+        const allDbGroups = await prisma.group.findMany({
+          include: {
+            githubIssues: {
+              select: {
+                issueNumber: true,
+                issueTitle: true,
+                issueBody: true,
+                issueLabels: true,
+              },
+            },
+          },
+        });
+        
+        // Filter groups based on force flag - if not force, only match groups without features
+        const allGroups = force 
+          ? allDbGroups 
+          : allDbGroups.filter(group => {
+              const features = group.affectsFeatures as unknown[];
+              return !features || !Array.isArray(features) || features.length === 0;
+            });
+        console.error(`[Group Feature Matching] Found ${allGroups.length} groups to match (${allDbGroups.length} total, force=${force})`);
+
+        if (allGroups.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: force 
+                  ? "No groups found in database. Run group_github_issues first."
+                  : "All groups already have features matched. Use force=true to re-match.",
+                stats: { total_groups: 0, matched: 0, skipped: 0 },
+              }, null, 2),
+            }],
+          };
+        }
+
+        // STEP 3: Compute/load group embeddings
+        console.error(`[Group Feature Matching] Computing group embeddings...`);
+        const { computeAndSaveGroupEmbeddings } = await import("../storage/db/embeddings.js");
+        const embeddingResult = await computeAndSaveGroupEmbeddings(process.env.OPENAI_API_KEY, undefined, false);
+        console.error(`[Group Feature Matching] Group embeddings: ${embeddingResult.computed} computed, ${embeddingResult.cached} cached`);
+
+        // STEP 4: Load feature embeddings (compute if missing)
+        console.error(`[Group Feature Matching] Loading feature embeddings...`);
+        const { computeAndSaveFeatureEmbeddings } = await import("../storage/db/embeddings.js");
+        await computeAndSaveFeatureEmbeddings(process.env.OPENAI_API_KEY);
+        
+        // Reload features with embeddings
+        const featuresWithEmbeddings = await prisma.feature.findMany({
+          include: { embedding: true },
+        });
+        
+        // Build feature embedding map
+        const featureEmbeddingMap = new Map<string, number[]>();
+        for (const feature of featuresWithEmbeddings) {
+          if (feature.embedding?.embedding) {
+            featureEmbeddingMap.set(feature.id, feature.embedding.embedding as number[]);
+          }
+        }
+        console.error(`[Group Feature Matching] Loaded ${featureEmbeddingMap.size} feature embeddings`);
+
+        // STEP 5: Load code-to-feature mappings for additional matching
+        console.error(`[Group Feature Matching] Loading code-to-feature mappings...`);
+        const codeFeatureMappings = await prisma.featureCodeMapping.findMany({
+          select: {
+            featureId: true,
+            similarity: true,
+          },
+        });
+        
+        // Build map of feature -> max code similarity
+        const codeToFeatureMap = new Map<string, number>();
+        for (const mapping of codeFeatureMappings) {
+          const current = codeToFeatureMap.get(mapping.featureId) || 0;
+          const similarity = Number(mapping.similarity);
+          if (similarity > current) {
+            codeToFeatureMap.set(mapping.featureId, similarity);
+          }
+        }
+        console.error(`[Group Feature Matching] Found code mappings for ${codeToFeatureMap.size} features`);
+
+        // Cosine similarity function
+        const cosineSimilarity = (a: number[], b: number[]): number => {
+          let dotProduct = 0;
+          let normA = 0;
+          let normB = 0;
+          for (let i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+          }
+          return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        };
+
+        // STEP 6: Match each group to features
+        console.error(`[Group Feature Matching] Matching ${allGroups.length} groups to features...`);
+        let matchedCount = 0;
+        let skippedCount = 0;
+        const matchResults: Array<{ groupId: string; features: Array<{ id: string; name: string; similarity: number }> }> = [];
+
+        // Reload group embeddings
+        const groupEmbeddings = await prisma.groupEmbedding.findMany({
+          where: { groupId: { in: allGroups.map(g => g.id) } },
+        });
+        const groupEmbeddingMap = new Map<string, number[]>();
+        for (const emb of groupEmbeddings) {
+          groupEmbeddingMap.set(emb.groupId, emb.embedding as number[]);
+        }
+
+        for (const group of allGroups) {
+          const groupEmb = groupEmbeddingMap.get(group.id);
+          
+          if (!groupEmb) {
+            console.error(`[Group Feature Matching] No embedding for group ${group.id}, skipping`);
+            skippedCount++;
+            continue;
+          }
+
+          // Calculate similarity to each feature
+          const featureMatches: Array<{ id: string; name: string; similarity: number; codeBoosted: boolean }> = [];
+
+          for (const feature of featuresWithEmbeddings) {
+            const featureEmb = featureEmbeddingMap.get(feature.id);
+            if (!featureEmb) continue;
+
+            let similarity = cosineSimilarity(groupEmb, featureEmb);
+            let codeBoosted = false;
+
+            // Boost with code similarity if available
+            const codeSimilarity = codeToFeatureMap.get(feature.id);
+            if (codeSimilarity && codeSimilarity > 0.5) {
+              // Blend semantic and code similarities
+              similarity = Math.max(similarity, similarity * 0.7 + codeSimilarity * 0.3);
+              codeBoosted = true;
+            }
+
+            if (similarity >= min_similarity) {
+              featureMatches.push({
+                id: feature.id,
+                name: feature.name,
+                similarity,
+                codeBoosted,
+              });
+            }
+          }
+
+          // Sort by similarity and take top 5
+          featureMatches.sort((a, b) => b.similarity - a.similarity);
+          const topFeatures = featureMatches.slice(0, 5);
+
+          // Default to "General" if no matches
+          const affectsFeatures = topFeatures.length > 0
+            ? topFeatures.map(f => ({ id: f.id, name: f.name }))
+            : [{ id: "general", name: "General" }];
+
+          // Update group in database
+          await prisma.group.update({
+            where: { id: group.id },
+            data: {
+              affectsFeatures: affectsFeatures,
+            },
+          });
+
+          matchedCount++;
+          matchResults.push({
+            groupId: group.id,
+            features: topFeatures.map(f => ({ id: f.id, name: f.name, similarity: Math.round(f.similarity * 100) / 100 })),
+          });
+
+          // Log progress every 10 groups
+          if (matchedCount % 10 === 0) {
+            console.error(`[Group Feature Matching] Matched ${matchedCount}/${allGroups.length} groups...`);
+          }
+        }
+
+        console.error(`[Group Feature Matching] Completed: ${matchedCount} matched, ${skippedCount} skipped`);
+
+        // Build summary by feature
+        const featureSummary = new Map<string, number>();
+        for (const result of matchResults) {
+          for (const feature of result.features) {
+            featureSummary.set(feature.name, (featureSummary.get(feature.name) || 0) + 1);
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Matched ${matchedCount} groups to features`,
+              stats: {
+                total_groups: allGroups.length,
+                matched: matchedCount,
+                skipped: skippedCount,
+                features_used: featureSummary.size,
+              },
+              feature_distribution: Object.fromEntries(
+                [...featureSummary.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)
+              ),
+              sample_matches: matchResults.slice(0, 10).map(r => ({
+                group: r.groupId,
+                top_feature: r.features[0]?.name || "General",
+                similarity: r.features[0]?.similarity || 0,
+              })),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        logError("Group feature matching failed:", error);
+        throw new Error(`Group feature matching failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
