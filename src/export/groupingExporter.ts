@@ -3343,10 +3343,10 @@ export async function exportIssuesToPMTool(
     // =============================================================
     const projectMappings = new Map<string, string>(); // feature_id -> project_id
     
-    if (linearTool?.createOrGetProject && (pmIssues.length > 0 || updateProjects)) {
+    if (linearTool?.createOrGetProject && (pmIssues.length > 0 || update)) {
       log("Creating/mapping Linear projects for features...");
       
-      // Collect unique features from pmIssues AND from database (for update_projects)
+      // Collect unique features from pmIssues AND from database (for update)
       const featureMap = new Map<string, string>(); // feature_id -> feature_name
       
       // From pmIssues (new exports)
@@ -3356,8 +3356,8 @@ export async function exportIssuesToPMTool(
         }
       }
       
-      // From database features (for update_projects)
-      if (updateProjects) {
+      // From database features (for update - need all features to map projects)
+      if (update) {
         const allFeatures = await prisma.feature.findMany();
         for (const feature of allFeatures) {
           if (!featureMap.has(feature.id)) {
@@ -3496,11 +3496,65 @@ export async function exportIssuesToPMTool(
             if (hasChanges) {
               if (dryRun) {
                 log(`  [DRY RUN] Would update group ${group.id} (${group.linearIssueId}) with: ${JSON.stringify(updates)}`);
+                updatedCount++;
               } else {
-                await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
-                log(`  Updated group ${group.id} (${group.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                try {
+                  await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
+                  log(`  Updated group ${group.id} (${group.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                  updatedCount++;
+                } catch (updateError) {
+                  // If project assignment fails due to team mismatch, try to fix the project
+                  const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
+                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id) {
+                    const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
+                    log(`  Project assignment failed for group ${group.id} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with UnMute team...`);
+                    
+                    // Try to update the project to associate with UnMute team
+                    const updateProjectMethod = (linearTool as any).updateProjectTeam;
+                    if (updateProjectMethod && typeof updateProjectMethod === 'function') {
+                      try {
+                        const projectUpdated = await updateProjectMethod.call(linearTool, updates.project_id);
+                        if (projectUpdated) {
+                          log(`  Successfully updated project ${updates.project_id} to associate with UnMute team, retrying group update...`);
+                          // Retry the full update now that project is workspace-level
+                          try {
+                            await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
+                            log(`  Updated group ${group.id} (${group.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                            updatedCount++;
+                            continue; // Success, skip to next iteration
+                          } catch (retryError) {
+                            logError(`  Failed to update group ${group.id} after fixing project:`, retryError);
+                            errorCount++;
+                            continue;
+                          }
+                        }
+                      } catch (projectUpdateError) {
+                        logError(`  Failed to update project ${updates.project_id} team:`, projectUpdateError);
+                      }
+                    }
+                    
+                    // If project update failed or method doesn't exist, fall back to updating without project
+                    log(`  Project update failed or unavailable, updating other fields only`);
+                    const updatesWithoutProject = { ...updates };
+                    delete updatesWithoutProject.project_id;
+                    if (Object.keys(updatesWithoutProject).length > 0) {
+                      try {
+                        await updateIssueMethod.call(linearTool, group.linearIssueId, updatesWithoutProject);
+                        log(`  Updated group ${group.id} (${group.linearIssueId}) with changes (without project): ${Object.keys(updatesWithoutProject).join(", ")}`);
+                        updatedCount++;
+                      } catch (retryError) {
+                        logError(`  Failed to update group ${group.id} (even without project):`, retryError);
+                        errorCount++;
+                      }
+                    } else {
+                      log(`  Skipping group ${group.id} - only project changed and it's incompatible`);
+                      skippedCount++;
+                    }
+                  } else {
+                    throw updateError; // Re-throw if it's a different error
+                  }
+                }
               }
-              updatedCount++;
             } else {
               skippedCount++;
             }
@@ -3565,11 +3619,65 @@ export async function exportIssuesToPMTool(
             if (hasChanges) {
               if (dryRun) {
                 log(`  [DRY RUN] Would update issue #${issue.issueNumber} (${issue.linearIssueId}) with: ${JSON.stringify(updates)}`);
+                updatedCount++;
               } else {
-                await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);
-                log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                try {
+                  await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);
+                  log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                  updatedCount++;
+                } catch (updateError) {
+                  // If project assignment fails due to team mismatch, try to fix the project
+                  const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
+                  if (errorMsg.includes("Discrepancy between issue team") && updates.project_id) {
+                    const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
+                    log(`  Project assignment failed for issue #${issue.issueNumber} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with UnMute team...`);
+                    
+                    // Try to update the project to associate with UnMute team
+                    const updateProjectMethod = (linearTool as any).updateProjectTeam;
+                    if (updateProjectMethod && typeof updateProjectMethod === 'function') {
+                      try {
+                        const projectUpdated = await updateProjectMethod.call(linearTool, updates.project_id);
+                        if (projectUpdated) {
+                          log(`  Successfully updated project ${updates.project_id} to associate with UnMute team, retrying issue update...`);
+                          // Retry the full update now that project is workspace-level
+                          try {
+                            await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);
+                            log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes: ${Object.keys(updates).join(", ")}`);
+                            updatedCount++;
+                            continue; // Success, skip to next iteration
+                          } catch (retryError) {
+                            logError(`  Failed to update issue #${issue.issueNumber} after fixing project:`, retryError);
+                            errorCount++;
+                            continue;
+                          }
+                        }
+                      } catch (projectUpdateError) {
+                        logError(`  Failed to update project ${updates.project_id} team:`, projectUpdateError);
+                      }
+                    }
+                    
+                    // If project update failed or method doesn't exist, fall back to updating without project
+                    log(`  Project update failed or unavailable, updating other fields only`);
+                    const updatesWithoutProject = { ...updates };
+                    delete updatesWithoutProject.project_id;
+                    if (Object.keys(updatesWithoutProject).length > 0) {
+                      try {
+                        await updateIssueMethod.call(linearTool, issue.linearIssueId, updatesWithoutProject);
+                        log(`  Updated issue #${issue.issueNumber} (${issue.linearIssueId}) with changes (without project): ${Object.keys(updatesWithoutProject).join(", ")}`);
+                        updatedCount++;
+                      } catch (retryError) {
+                        logError(`  Failed to update issue #${issue.issueNumber} (even without project):`, retryError);
+                        errorCount++;
+                      }
+                    } else {
+                      log(`  Skipping issue #${issue.issueNumber} - only project changed and it's incompatible`);
+                      skippedCount++;
+                    }
+                  } else {
+                    throw updateError; // Re-throw if it's a different error
+                  }
+                }
               }
-              updatedCount++;
             } else {
               skippedCount++;
             }

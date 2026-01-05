@@ -224,8 +224,7 @@ export class LinearIntegration extends BasePMTool {
       input: {
         name: sanitizedName,
         description: sanitizedDescription,
-        // Note: teamIds is optional - projects are workspace-level in Linear
-        // If teamId is provided, we can associate the project with the team
+        // Associate project with UnMute team to ensure compatibility with issues
         // Only include teamIds if teamId is valid (non-empty string)
         ...(this.teamId && this.teamId.trim() && { teamIds: [this.teamId] }),
       },
@@ -282,6 +281,118 @@ export class LinearIntegration extends BasePMTool {
         }
       }
       throw error;
+    }
+  }
+
+  /**
+   * Get project details including teamIds
+   */
+  private async getProject(projectId: string): Promise<{ id: string; name: string; teamIds: string[] } | null> {
+    const query = `
+      query GetProject($id: String!) {
+        project(id: $id) {
+          id
+          name
+          teams {
+            nodes {
+              id
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest<{
+        project?: {
+          id: string;
+          name: string;
+          teams?: {
+            nodes?: Array<{ id: string }>;
+          };
+        };
+      }>(query, { id: projectId });
+
+      if (response.data?.project) {
+        const teamIds = response.data.project.teams?.nodes?.map(t => t.id) || [];
+        return {
+          id: response.data.project.id,
+          name: response.data.project.name,
+          teamIds,
+        };
+      }
+      return null;
+    } catch (error) {
+      logError(`Failed to get project ${projectId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Update project to associate with UnMute team
+   * Adds UnMute team to existing teams (doesn't remove existing teams)
+   * This makes projects compatible with issues from the UnMute team
+   */
+  async updateProjectTeam(projectId: string): Promise<boolean> {
+    if (!this.teamId) {
+      logError(`Cannot update project team - no teamId configured`);
+      return false;
+    }
+
+    // First, get the current project to see existing teams
+    const currentProject = await this.getProject(projectId);
+    if (!currentProject) {
+      logError(`Cannot update project ${projectId} - project not found`);
+      return false;
+    }
+
+    // Check if UnMute team is already in the project's teams
+    if (currentProject.teamIds.includes(this.teamId)) {
+      log(`Project ${projectId} already associated with team ${this.teamId}`);
+      return true;
+    }
+
+    // Add UnMute team to existing teams (don't remove existing teams)
+    const updatedTeamIds = [...new Set([...currentProject.teamIds, this.teamId])];
+
+    const query = `
+      mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {
+        projectUpdate(id: $id, input: $input) {
+          success
+          project {
+            id
+            name
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlRequest<{
+        projectUpdate?: {
+          success: boolean;
+          project?: {
+            id: string;
+            name: string;
+          };
+        };
+      }>(query, {
+        id: projectId,
+        input: {
+          teamIds: updatedTeamIds, // Add UnMute team to existing teams
+        },
+      });
+
+      if (response.data?.projectUpdate?.success) {
+        log(`Updated project ${projectId} to include team ${this.teamId} (teams: ${updatedTeamIds.join(", ")})`);
+        return true;
+      } else {
+        logError(`Failed to update project ${projectId}: ${JSON.stringify(response.errors)}`);
+        return false;
+      }
+    } catch (error) {
+      logError(`Error updating project ${projectId} team:`, error);
+      return false;
     }
   }
 
@@ -661,7 +772,7 @@ export class LinearIntegration extends BasePMTool {
    * Get Linear issue by ID (for reading status/updates)
    * Useful for back-propagating Linear state to internal tracking
    */
-  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string; priority?: number; labelNames?: string[] } | null> {
+  async getIssue(issueId: string): Promise<{ id: string; identifier: string; url: string; title: string; description?: string; state: string; stateId?: string; assigneeId?: string; projectId?: string; projectName?: string; priority?: number; labelNames?: string[]; teamId?: string; teamName?: string } | null> {
     const query = `
       query GetIssue($id: String!) {
         issue(id: $id) {
@@ -676,6 +787,10 @@ export class LinearIntegration extends BasePMTool {
           }
           assignee {
             id
+          }
+          team {
+            id
+            name
           }
           project {
             id
@@ -702,6 +817,7 @@ export class LinearIntegration extends BasePMTool {
           description?: string;
           state?: { id: string; name: string };
           assignee?: { id: string } | null;
+          team?: { id: string; name: string } | null;
           project?: { id: string; name: string } | null;
           priority?: number | null;
           labels?: { nodes: Array<{ id: string; name: string }> };
@@ -718,6 +834,8 @@ export class LinearIntegration extends BasePMTool {
           state: response.data.issue.state?.name || "Unknown",
           stateId: response.data.issue.state?.id,
           assigneeId: response.data.issue.assignee?.id,
+          teamId: response.data.issue.team?.id,
+          teamName: response.data.issue.team?.name,
           projectId: response.data.issue.project?.id ?? undefined,
           projectName: response.data.issue.project?.name ?? undefined,
           priority: response.data.issue.priority ?? undefined,
