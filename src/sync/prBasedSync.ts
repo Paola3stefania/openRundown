@@ -1131,17 +1131,27 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
 
     // Build a map: issue number -> array of PRs that reference it
     const issueToPRsMap = new Map<number, GitHubPR[]>();
-    // Improved pattern: matches:
-    // - closes/fixes/resolves #123, #123, repo#123
+    // Strict pattern: matches ONLY explicit issue references:
+    // - closes/fixes/resolves #123 (REQUIRES hash after keyword)
+    // - closes/fixes/resolves repo#123 (REQUIRES hash after repo)
+    // - #123 (standalone hash)
+    // - repo#123 (repo prefix with hash)
     // - @PR 92, @PR#92, @PR-92
-    // - GitHub issue URLs: https://github.com/owner/repo/issues/123
-    // - Cross-repo format: better-auth#7014
-    const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s*(?:[\w-]+#)?(\d+)\b|(?:[\w-]+#)?(\d+)\b|@PR\s*[#-]?(\d+)\b|github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)/gi;
+    // - GitHub issue URLs: 
+    //   - https://github.com/owner/repo/issues/123
+    //   - http://github.com/owner/repo/issues/123
+    //   - github.com/owner/repo/issues/123 (without protocol)
+    //   - URLs with query params or fragments
+    // NOTE: We do NOT match:
+    // - Standalone numbers (like "3076" or "4493")
+    // - Numbers after keywords without hash (like "closes 123" - must be "closes #123")
+    // - Version numbers or other numeric patterns
+    const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s+(?:[\w-]+)?#(\d+)\b|#(\d+)\b|[\w-]+#(\d+)\b|@PR\s*[#-]?(\d+)\b|(?:https?:\/\/)?(?:www\.)?github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)(?:\?[^\s]*)?(?:#[^\s]*)?/gi;
     
     // Process both open and merged PRs
     const allPRs = [...allOpenPRs, ...mergedPRs];
     
-    for (const pr of allPRs) {
+      for (const pr of allPRs) {
       // Check both PR title and body for issue references
       const title = pr.title || '';
       const body = pr.body || '';
@@ -1151,24 +1161,49 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
       // Use Set to deduplicate issue numbers from the same PR
       const issueNumbers = new Set<number>();
       
+      // Debug logging for specific PRs that might cause false positives
+      const isDebugPR = pr.number === 4360 || pr.number === 92;
+      
+      if (isDebugPR) {
+        log(`[PR Sync] DEBUG: Checking PR #${pr.number} by ${pr.user.login} - found ${matches.length} potential matches`);
+      }
+      
       for (const match of matches) {
         // Check all capture groups: 
         // match[1] for closes/fixes with optional repo# format
-        // match[2] for standalone #123 or repo#123 format
-        // match[3] for @PR format
-        // match[4] for GitHub issue URLs
-        const issueNum = parseInt(match[1] || match[2] || match[3] || match[4] || '', 10);
+        // match[2] for standalone #123 (with hash)
+        // match[3] for repo#123 format (with repo prefix and hash)
+        // match[4] for @PR format
+        // match[5] for GitHub issue URLs
+        const issueNum = parseInt(match[1] || match[2] || match[3] || match[4] || match[5] || '', 10);
         if (issueNum && !isNaN(issueNum)) {
           issueNumbers.add(issueNum);
+          if (isDebugPR) {
+            log(`[PR Sync] DEBUG: PR #${pr.number} matched issue #${issueNum} with pattern: "${match[0]}" (full match: "${match[0]}", groups: [${match[1] || ''}, ${match[2] || ''}, ${match[3] || ''}, ${match[4] || ''}, ${match[5] || ''}])`);
+          }
         }
       }
       
       // Add this PR to all issues it references
+      // Only add if the issue number exists in our database (to avoid false positives)
       for (const issueNum of issueNumbers) {
+        // Verify the issue exists in our database before linking
+        const issueExists = issues.some(issue => issue.issueNumber === issueNum);
+        if (issueExists) {
           if (!issueToPRsMap.has(issueNum)) {
             issueToPRsMap.set(issueNum, []);
           }
           issueToPRsMap.get(issueNum)!.push(pr);
+          if (isDebugPR) {
+            log(`[PR Sync] DEBUG: PR #${pr.number} linked to issue #${issueNum} (issue exists in database)`);
+          }
+        } else {
+          // Log when we skip a potential match to help debug false positives
+          log(`[PR Sync] Skipping potential issue #${issueNum} reference in PR #${pr.number} - issue not found in database`);
+          if (isDebugPR) {
+            log(`[PR Sync] DEBUG: PR #${pr.number} would link to issue #${issueNum} but issue not in database`);
+          }
+        }
       }
     }
 
@@ -1185,6 +1220,20 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
         if (pr.title?.includes("7014") || pr.body?.includes("7014")) {
           log(`[PR Sync] DEBUG: Found PR #${pr.number} by ${pr.user.login} that mentions 7014 in title/body`);
         }
+      }
+    }
+    
+    // Debug: Check if issue #5387 is in the map (for false positive debugging)
+    if (issueToPRsMap.has(5387)) {
+      const prsFor5387 = issueToPRsMap.get(5387)!;
+      log(`[PR Sync] DEBUG: Found ${prsFor5387.length} PR(s) for issue #5387: ${prsFor5387.map(pr => `PR #${pr.number} by ${pr.user.login} (merged: ${pr.merged}, url: ${pr.html_url})`).join(", ")}`);
+      // Log the actual text that matched for debugging
+      for (const pr of prsFor5387) {
+        const title = pr.title || '';
+        const body = pr.body || '';
+        const fullText = `${title}\n${body}`;
+        const matches = [...fullText.matchAll(issueRefPattern)];
+        log(`[PR Sync] DEBUG: PR #${pr.number} matched ${matches.length} issue reference(s). Matches: ${matches.map(m => m[0]).join(", ")}`);
       }
     }
 
