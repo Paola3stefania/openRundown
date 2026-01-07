@@ -204,6 +204,12 @@ model GitHubIssue {
   // LLM-detected labels (bug, security, regression, enhancement, urgent)
   detectedLabels       String[] @default([]) @map("detected_labels")
   
+  // Comment analysis for closure confirmation (cached LLM result)
+  waitingForClosureConfirmation Boolean? @map("waiting_for_closure_confirmation")
+  closureConfirmationReason     String?  @map("closure_confirmation_reason")
+  commentsAnalyzedAt            DateTime? @map("comments_analyzed_at")
+  commentCountAtAnalysis        Int?     @map("comment_count_at_analysis") // Track comment count when analyzed
+  
   // Export status
   exportStatus         String?  @map("export_status") // 'pending' | 'exported' | null (not exported yet)
   exportedAt           DateTime? @map("exported_at")

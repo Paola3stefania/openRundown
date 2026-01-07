@@ -505,6 +505,16 @@ export class LinearIntegration extends BasePMTool {
     // We maintain a mapping table externally (in export results or mapping file)
     // This method is primarily used when no stored ID exists
     
+    // First, try searching by source_id in description (most reliable)
+    try {
+      const foundById = await this.searchIssueBySourceId(sourceId);
+      if (foundById) {
+        return foundById;
+      }
+    } catch (error) {
+      logError(`Failed to search Linear issue by source_id "${sourceId}":`, error);
+    }
+    
     // As a fallback, try searching by title if provided
     if (title) {
       try {
@@ -526,6 +536,97 @@ export class LinearIntegration extends BasePMTool {
     return null;
   }
   
+  /**
+   * Search for Linear issue by source_id in description
+   * We store source_id in the description for duplicate detection
+   */
+  private async searchIssueBySourceId(sourceId: string): Promise<{ id: string; url: string } | null> {
+    if (!this.teamId) {
+      // Can't search without team context - try to get team issues directly
+      return null;
+    }
+
+    // First, try to get all team issues and search in their descriptions
+    // This is more reliable than using issueSearch which may not search descriptions
+    try {
+      const teamIssues = await this.listTeamIssues(this.teamId, 250);
+      
+      // Search for source_id in description
+      const exactMatch = teamIssues.find(
+        (issue) => {
+          const desc = issue.description || "";
+          // Look for source_id in the description (we store it as HTML comment)
+          return desc.includes(`source_id: ${sourceId}`);
+        }
+      );
+      
+      if (exactMatch) {
+        // Get full issue details to return URL
+        const fullIssue = await this.getIssue(exactMatch.id);
+        if (fullIssue) {
+          return {
+            id: fullIssue.id,
+            url: fullIssue.url,
+          };
+        }
+      }
+    } catch (error) {
+      logError(`Failed to search Linear issue by source_id "${sourceId}":`, error);
+    }
+    
+    // Fallback: try Linear's search API (may not search descriptions)
+    try {
+      const query = `
+        query SearchIssues($query: String!) {
+          issueSearch(query: $query, first: 20) {
+            nodes {
+              id
+              identifier
+              url
+              title
+              description
+            }
+          }
+        }
+      `;
+
+      // Search for source_id - Linear search may not support description search
+      const searchQuery = `"${sourceId}"`;
+      const response = await this.graphqlRequest<{
+        issueSearch?: {
+          nodes?: Array<{
+            id: string;
+            title: string;
+            url: string;
+            description?: string;
+          }>;
+        };
+      }>(query, { query: searchQuery });
+      
+      if (response.data?.issueSearch?.nodes) {
+        // Find exact source_id match in description
+        const exactMatch = response.data.issueSearch.nodes.find(
+          (issue) => {
+            const desc = issue.description || "";
+            // Look for source_id in the description
+            return desc.includes(`source_id: ${sourceId}`);
+          }
+        );
+        
+        if (exactMatch) {
+          return {
+            id: exactMatch.id,
+            url: exactMatch.url,
+          };
+        }
+      }
+    } catch (error) {
+      logError(`Failed to search Linear issue by source_id using search API "${sourceId}":`, error);
+    }
+    
+    return null;
+  }
+
   /**
    * Search for Linear issue by title (used for duplicate detection)
    * Returns the first matching issue found
@@ -1376,6 +1477,11 @@ export class LinearIntegration extends BasePMTool {
 
   private formatDescription(issue: PMToolIssue): string {
     let description = issue.description || "";
+    
+    // Add source_id for duplicate detection (at the top, hidden in a comment-like format)
+    if (issue.source_id) {
+      description = `<!-- source_id: ${issue.source_id} -->\n\n${description}`;
+    }
     
     // Add source links section
     description += `\n\n---\n\n`;

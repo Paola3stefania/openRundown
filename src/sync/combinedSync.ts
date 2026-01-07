@@ -29,6 +29,7 @@ export interface CombinedSyncResult {
     totalLinearTicketsChecked: number;
     issuesSetToInProgress: number;
     ticketsMarkedAsDone: number;
+    ticketsMarkedAsReview: number;
     totalUpdated: number;
   };
 }
@@ -52,7 +53,7 @@ export async function runCombinedSync(
     defaultAssigneeId,
   });
 
-  log(`[Combined Sync] PR sync complete: ${prSyncResult.updated} updated, ${prSyncResult.unchanged} unchanged, ${prSyncResult.skipped} skipped`);
+  log(`[Combined Sync] PR sync complete: ${prSyncResult.updated} updated (${prSyncResult.setToInProgress} In Progress, ${prSyncResult.setToReview} Review), ${prSyncResult.unchanged} unchanged, ${prSyncResult.skipped} skipped`);
 
   log("[Combined Sync] Step 2: Running Linear status sync (Done status)");
   
@@ -62,17 +63,21 @@ export async function runCombinedSync(
     force,
   });
 
-  log(`[Combined Sync] Linear status sync complete: ${linearSyncResult.markedDone} marked done, ${linearSyncResult.unchanged} unchanged`);
+  log(`[Combined Sync] Linear status sync complete: ${linearSyncResult.markedDone} marked done, ${linearSyncResult.markedReview || 0} marked review, ${linearSyncResult.unchanged} unchanged`);
+
+  // Combine Review status from both PR sync (merged PRs) and Linear sync (comment analysis)
+  const totalReview = prSyncResult.setToReview + (linearSyncResult.markedReview || 0);
 
   const summary = {
     totalIssuesChecked: prSyncResult.totalIssues,
     totalLinearTicketsChecked: linearSyncResult.totalLinearTickets,
-    issuesSetToInProgress: prSyncResult.updated,
+    issuesSetToInProgress: prSyncResult.setToInProgress,
     ticketsMarkedAsDone: linearSyncResult.markedDone,
-    totalUpdated: prSyncResult.updated + linearSyncResult.markedDone,
+    ticketsMarkedAsReview: totalReview,
+    totalUpdated: prSyncResult.updated + linearSyncResult.markedDone + (linearSyncResult.markedReview || 0),
   };
 
-  log(`[Combined Sync] Workflow complete: ${summary.totalUpdated} total updates (${summary.issuesSetToInProgress} In Progress, ${summary.ticketsMarkedAsDone} Done)`);
+  log(`[Combined Sync] Workflow complete: ${summary.totalUpdated} total updates (${summary.issuesSetToInProgress} In Progress, ${summary.ticketsMarkedAsDone} Done, ${summary.ticketsMarkedAsReview} Review)`);
 
   return {
     success: true,
@@ -82,6 +87,9 @@ export async function runCombinedSync(
     summary,
   };
 }
+
+
+
 
 
 

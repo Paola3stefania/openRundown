@@ -40,6 +40,7 @@ const LINEAR_STATUS = {
 
 const SYNC_ACTIONS = {
   MARKED_DONE: "marked_done",
+  MARKED_REVIEW: "marked_review",
   UNCHANGED: "unchanged",
   SKIPPED: "skipped",
   ERROR: "error",
@@ -56,6 +57,7 @@ export interface SyncSummary {
   totalLinearTickets: number;
   synced: number;
   markedDone: number;
+  markedReview: number;
   skippedNoLinks: number;
   unchanged: number;
   errors: number;
@@ -147,6 +149,172 @@ function extractGitHubPRUrls(text: string): GitHubPRUrl[] {
 // ============================================================================
 // GitHub API Utilities
 // ============================================================================
+
+/**
+ * Analyze issue comments to determine if waiting for user closure confirmation
+ * Uses LLM to understand context from comment embeddings
+ * Caches results in database to avoid repeated LLM calls
+ */
+async function analyzeCommentsForClosureConfirmation(
+  issueNumber: number,
+  prisma: PrismaClient
+): Promise<{ waitingForConfirmation: boolean; reason: string }> {
+  try {
+    // Get issue with comments and cached analysis from database
+    const issue = await prisma.gitHubIssue.findUnique({
+      where: { issueNumber },
+      select: {
+        issueTitle: true,
+        issueBody: true,
+        issueComments: true,
+        waitingForClosureConfirmation: true,
+        closureConfirmationReason: true,
+        commentsAnalyzedAt: true,
+        commentCountAtAnalysis: true,
+        issueUpdatedAt: true,
+      },
+    });
+
+    if (!issue) {
+      return { waitingForConfirmation: false, reason: "Issue not found in database" };
+    }
+
+    // Parse comments from JSON
+    interface IssueComment {
+      body?: string;
+      user?: { login?: string };
+      created_at?: string;
+    }
+
+    const comments = Array.isArray(issue.issueComments)
+      ? (issue.issueComments as unknown[]).map((c: unknown) => c as IssueComment)
+      : [];
+
+    if (comments.length === 0) {
+      return { waitingForConfirmation: false, reason: "No comments found" };
+    }
+
+    // Check if we have a cached analysis that's still valid
+    // Re-analyze ONLY if:
+    // 1. No cached analysis exists, OR
+    // 2. Number of comments increased (new comments were added)
+    const currentCommentCount = comments.length;
+    const previousCommentCount = issue.commentCountAtAnalysis ?? 0;
+    
+    // Only re-analyze if comment count increased (new comments added)
+    const hasNewComments = currentCommentCount > previousCommentCount;
+    const needsReanalysis = 
+      issue.waitingForClosureConfirmation === null ||
+      !issue.commentsAnalyzedAt ||
+      hasNewComments;
+
+    if (!needsReanalysis && issue.waitingForClosureConfirmation !== null) {
+      // Use cached result
+      log(`[Sync] Using cached comment analysis for issue #${issueNumber}: ${issue.waitingForClosureConfirmation ? "waiting" : "not waiting"}`);
+      return {
+        waitingForConfirmation: issue.waitingForClosureConfirmation,
+        reason: issue.closureConfirmationReason || "Cached analysis",
+      };
+    }
+
+    // Need to analyze - build context from issue and comments
+    const issueText = `${issue.issueTitle}\n\n${issue.issueBody || ""}`;
+    const commentsText = comments
+      .map((c, idx) => `Comment ${idx + 1} by ${c.user?.login || "unknown"}:\n${c.body || ""}`)
+      .join("\n\n---\n\n");
+
+    const fullContext = `Issue:\n${issueText}\n\nComments:\n${commentsText}`;
+
+    // Use LLM to analyze if waiting for closure confirmation
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      log("[Sync] OPENAI_API_KEY not set, skipping comment analysis");
+      return { waitingForConfirmation: false, reason: "OpenAI API key not configured" };
+    }
+
+    log(`[Sync] Analyzing comments for issue #${issueNumber} using LLM...`);
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are analyzing GitHub issue comments to determine if the issue owner/maintainer is waiting for the user/contributor to confirm that the issue is resolved before closing it.
+
+Look for patterns like:
+- "waiting for closure confirmation"
+- "waiting for you to close"
+- "please confirm if this is resolved"
+- "let me know if this fixes it"
+- "can you verify this works"
+- "please test and confirm"
+- PR is merged but issue owner is waiting for user to confirm resolution
+- Issue owner asking user to close the issue after testing
+
+Return JSON: {"waiting": true/false, "reason": "brief explanation"}`,
+          },
+          {
+            role: "user",
+            content: fullContext,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.3,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      logError(`[Sync] OpenAI API error: ${response.status} ${errorText}`);
+      return { waitingForConfirmation: false, reason: `API error: ${response.status}` };
+    }
+
+    const result = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) {
+      return { waitingForConfirmation: false, reason: "No response from LLM" };
+    }
+
+    try {
+      const analysis = JSON.parse(content) as { waiting?: boolean; reason?: string };
+      const waitingForConfirmation = analysis.waiting === true;
+      const reason = analysis.reason || "Analyzed comments";
+
+      // Cache the result in database, including comment count
+      await prisma.gitHubIssue.update({
+        where: { issueNumber },
+        data: {
+          waitingForClosureConfirmation: waitingForConfirmation,
+          closureConfirmationReason: reason,
+          commentsAnalyzedAt: new Date(),
+          commentCountAtAnalysis: currentCommentCount, // Store comment count for comparison
+        },
+      });
+
+      log(`[Sync] Cached comment analysis for issue #${issueNumber}: ${waitingForConfirmation ? "waiting" : "not waiting"}`);
+
+      return {
+        waitingForConfirmation,
+        reason,
+      };
+    } catch (parseError) {
+      logError(`[Sync] Failed to parse LLM response: ${content}`, parseError);
+      return { waitingForConfirmation: false, reason: "Failed to parse LLM response" };
+    }
+  } catch (error) {
+    logError(`[Sync] Error analyzing comments for issue #${issueNumber}:`, error);
+    return { waitingForConfirmation: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 
 // ============================================================================
@@ -437,17 +605,22 @@ async function syncAndCheckPRStates(
 function shouldMarkDone(
   issueStates: Array<{ number: number; state: string }>,
   prStates: Array<{ url: string; merged: boolean }>
-): { shouldMark: boolean; reason: string } {
+): { shouldMark: boolean; reason: string; mergedPRsWithOpenIssues: boolean } {
   const hasIssues = issueStates.length > 0;
   const allIssuesClosed = hasIssues && issueStates.every(i => i.state === ISSUE_STATES.CLOSED);
   
   const hasPRs = prStates.length > 0;
   const anyPRMerged = hasPRs && prStates.some(p => p.merged);
+  const hasOpenIssues = hasIssues && issueStates.some(i => i.state === ISSUE_STATES.OPEN);
+  
+  // Special case: PR merged but issue still open - need to check comments
+  const mergedPRsWithOpenIssues = anyPRMerged && hasOpenIssues && !allIssuesClosed;
   
   if (allIssuesClosed && anyPRMerged) {
     return {
       shouldMark: true,
       reason: `All ${issueStates.length} issues closed AND ${prStates.filter(p => p.merged).length} PR(s) merged`,
+      mergedPRsWithOpenIssues: false,
     };
   }
   
@@ -455,13 +628,16 @@ function shouldMarkDone(
     return {
       shouldMark: true,
       reason: `All ${issueStates.length} GitHub issue(s) closed`,
+      mergedPRsWithOpenIssues: false,
     };
   }
   
-  if (anyPRMerged) {
+  // If PR is merged but issue is still open, don't mark as done yet - check comments first
+  if (anyPRMerged && !allIssuesClosed) {
     return {
-      shouldMark: true,
-      reason: `${prStates.filter(p => p.merged).length} PR(s) merged`,
+      shouldMark: false,
+      reason: `${prStates.filter(p => p.merged).length} PR(s) merged but ${issueStates.filter(i => i.state === ISSUE_STATES.OPEN).length} issue(s) still open - checking comments`,
+      mergedPRsWithOpenIssues: true,
     };
   }
   
@@ -478,6 +654,7 @@ function shouldMarkDone(
   return {
     shouldMark: false,
     reason: reasons.join(", ") || "No closed issues or merged PRs",
+    mergedPRsWithOpenIssues: false,
   };
 }
 
@@ -485,6 +662,7 @@ async function processTicket(
   ticket: { id: string; identifier: string; title?: string; description?: string },
   deps: SyncDependencies,
   doneStateId: string,
+  reviewStateId: string | null,
   dryRun: boolean
 ): Promise<SyncDetail> {
   const { prisma, linear, linearConfig, config, tokenManager } = deps;
@@ -579,6 +757,41 @@ async function processTicket(
     // Determine action
     const decision = shouldMarkDone(issueStates, prStates);
     
+    // Special handling: PR merged but issue still open - check comments
+    if (decision.mergedPRsWithOpenIssues && reviewStateId) {
+      const openIssueNumbers = issueStates
+        .filter(i => i.state === ISSUE_STATES.OPEN)
+        .map(i => i.number);
+      
+      if (openIssueNumbers.length > 0) {
+        // Check comments for the first open issue (or all if needed)
+        const analysis = await analyzeCommentsForClosureConfirmation(openIssueNumbers[0], prisma);
+        
+        if (analysis.waitingForConfirmation) {
+          // Set to Review status
+          if (!dryRun) {
+            await linear.updateIssueStateAndAssignee(
+              ticket.id,
+              reviewStateId,
+              undefined
+            );
+            
+            log(`[Sync] ${identifier}: -> Review (PR merged, waiting for user confirmation: ${analysis.reason})`);
+          }
+          
+          return {
+            linearIdentifier: identifier,
+            action: SYNC_ACTIONS.MARKED_REVIEW,
+            reason: dryRun 
+              ? `[DRY RUN] PR merged, waiting for closure confirmation: ${analysis.reason}`
+              : `PR merged, waiting for closure confirmation: ${analysis.reason}`,
+            githubIssues: issueStates,
+            prs: prStates,
+          };
+        }
+      }
+    }
+    
     if (decision.shouldMark) {
       if (!dryRun) {
         // Update state to Done (no assignment - that's handled by PR-based sync)
@@ -668,7 +881,17 @@ export async function syncLinearStatus(options: SyncOptions = {}): Promise<SyncS
       throw new Error("Could not find 'Done' workflow state in Linear");
     }
     
+    // Find Review state (common names: "Review", "In Review", "Reviewing")
+    const reviewState = workflowStates.find(
+      s => s.name.toLowerCase().includes("review") || s.name.toLowerCase() === "review"
+    );
+    
     log(`[Sync] Found Done state: ${doneState.name} (${doneState.id})`);
+    if (reviewState) {
+      log(`[Sync] Found Review state: ${reviewState.name} (${reviewState.id})`);
+    } else {
+      log(`[Sync] Warning: No Review state found. Review status updates will be skipped.`);
+    }
     
     // Initialize token manager lazily
     const tokenManager = await GitHubTokenManager.fromEnvironment();
@@ -694,15 +917,16 @@ export async function syncLinearStatus(options: SyncOptions = {}): Promise<SyncS
     const details: SyncDetail[] = [];
     
     for (const ticket of openLinearTickets) {
-      const result = await processTicket(ticket, deps, doneState.id, dryRun);
+      const result = await processTicket(ticket, deps, doneState.id, reviewState?.id || null, dryRun);
       details.push(result);
     }
     
     // Build summary
     const summary: SyncSummary = {
       totalLinearTickets: openLinearTickets.length,
-      synced: details.filter(d => d.action === SYNC_ACTIONS.MARKED_DONE).length,
+      synced: details.filter(d => d.action === SYNC_ACTIONS.MARKED_DONE || d.action === SYNC_ACTIONS.MARKED_REVIEW).length,
       markedDone: details.filter(d => d.action === SYNC_ACTIONS.MARKED_DONE).length,
+      markedReview: details.filter(d => d.action === SYNC_ACTIONS.MARKED_REVIEW).length,
       skippedNoLinks: details.filter(d => d.action === SYNC_ACTIONS.SKIPPED).length,
       unchanged: details.filter(d => d.action === SYNC_ACTIONS.UNCHANGED).length,
       errors: details.filter(d => d.action === SYNC_ACTIONS.ERROR).length,
@@ -710,7 +934,7 @@ export async function syncLinearStatus(options: SyncOptions = {}): Promise<SyncS
       details,
     };
   
-  log(`[Sync] Complete: ${summary.markedDone} marked done, ${summary.unchanged} unchanged, ${summary.skippedNoLinks} skipped (no links), ${summary.errors} errors`);
+  log(`[Sync] Complete: ${summary.markedDone} marked done, ${summary.markedReview} marked review, ${summary.unchanged} unchanged, ${summary.skippedNoLinks} skipped (no links), ${summary.errors} errors`);
   
   return summary;
     

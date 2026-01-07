@@ -450,6 +450,30 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "remove_linear_duplicates",
+    description: "Find and remove duplicate Linear issues by searching for issues with the same title. Groups issues by normalized title (case-insensitive) and identifies duplicates. In dry-run mode, shows what would be deleted. In actual mode, deletes duplicates keeping the oldest issue (or the one with more information).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, only shows what would be deleted without actually deleting. Default: true (safe mode).",
+          default: true,
+        },
+        team_name: {
+          type: "string",
+          description: "Linear team name to check for duplicates. If not provided, uses PM_TOOL_TEAM_ID from config.",
+        },
+        show_all_titles: {
+          type: "boolean",
+          description: "If true, shows all issue titles grouped by normalized title to help identify near-duplicates. Default: false.",
+          default: false,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "suggest_grouping",
     description: "Group related Discord messages by their matched GitHub issues from 1-to-1 classification. If no classification exists, runs classification first. Returns groups where Discord threads are linked via shared GitHub issues. Requires OPENAI_API_KEY.",
     inputSchema: {
@@ -4945,6 +4969,486 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     }
 
+    case "remove_linear_duplicates": {
+      const { dry_run = true, team_name, show_all_titles = false } = args as { dry_run?: boolean; team_name?: string; show_all_titles?: boolean };
+
+      try {
+        // Check required config
+        if (!process.env.PM_TOOL_API_KEY) {
+          throw new Error("PM_TOOL_API_KEY is required");
+        }
+
+        const { LinearIntegration } = await import("../export/linear/client.js");
+        const pmToolConfig = {
+          type: "linear" as const,
+          api_key: process.env.PM_TOOL_API_KEY,
+          team_id: process.env.PM_TOOL_TEAM_ID || undefined,
+        };
+
+        const linearTool = new LinearIntegration(pmToolConfig);
+
+        // Get team ID
+        let teamId = process.env.PM_TOOL_TEAM_ID;
+        if (team_name && !teamId) {
+          // Try to find team by name
+          const teams = await linearTool.listTeams();
+          const team = teams.find(t => t.name.toLowerCase() === team_name.toLowerCase());
+          if (team) {
+            teamId = team.id;
+          } else {
+            throw new Error(`Team "${team_name}" not found. Available teams: ${teams.map(t => t.name).join(", ")}`);
+          }
+        }
+
+        if (!teamId) {
+          throw new Error("PM_TOOL_TEAM_ID is required or provide team_name");
+        }
+
+        console.error(`[RemoveDuplicates] Fetching all Linear issues for team ${teamId} (including archived)...`);
+
+        // Fetch ALL issues from the team including archived ones
+        // Use GraphQL directly to get all issues with pagination
+        const allIssues: Array<{
+          id: string;
+          identifier: string;
+          url: string;
+          title: string;
+          description?: string;
+          state: string;
+        }> = [];
+
+        let hasNextPage = true;
+        let cursor: string | null = null;
+        const pageSize = 100;
+
+        while (hasNextPage) {
+          const query = `
+            query GetTeamIssues($teamId: String!, $first: Int!, $after: String) {
+              team(id: $teamId) {
+                issues(first: $first, after: $after, includeArchived: true) {
+                  nodes {
+                    id
+                    identifier
+                    url
+                    title
+                    description
+                    state {
+                      name
+                    }
+                  }
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                }
+              }
+            }
+          `;
+
+          const response = await fetch("https://api.linear.app/graphql", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": process.env.PM_TOOL_API_KEY!,
+            },
+            body: JSON.stringify({
+              query,
+              variables: { teamId, first: pageSize, after: cursor },
+            }),
+          });
+
+          const result = await response.json() as {
+            data?: {
+              team?: {
+                issues?: {
+                  nodes?: Array<{
+                    id: string;
+                    identifier: string;
+                    url: string;
+                    title: string;
+                    description?: string | null;
+                    state?: { name: string };
+                  }>;
+                  pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+                };
+              };
+            };
+            errors?: Array<{ message: string }>;
+          };
+
+          if (result.errors) {
+            throw new Error(`GraphQL errors: ${result.errors.map(e => e.message).join(", ")}`);
+          }
+
+          const nodes = result.data?.team?.issues?.nodes || [];
+          allIssues.push(...nodes.map(i => ({
+            id: i.id,
+            identifier: i.identifier,
+            url: i.url,
+            title: i.title,
+            description: i.description || undefined,
+            state: i.state?.name || "Unknown",
+          })));
+
+          hasNextPage = result.data?.team?.issues?.pageInfo?.hasNextPage || false;
+          cursor = result.data?.team?.issues?.pageInfo?.endCursor || null;
+
+          if (hasNextPage) {
+            console.error(`[RemoveDuplicates] Fetched ${allIssues.length} issues so far, fetching more...`);
+          }
+        }
+
+        console.error(`[RemoveDuplicates] Found ${allIssues.length} total issues (including archived)`);
+        
+        // Debug: Show state distribution
+        const stateCounts = new Map<string, number>();
+        for (const issue of allIssues) {
+          stateCounts.set(issue.state, (stateCounts.get(issue.state) || 0) + 1);
+        }
+        console.error(`[RemoveDuplicates] Issues by state: ${Array.from(stateCounts.entries()).map(([state, count]) => `${state}: ${count}`).join(", ")}`);
+
+        // Normalize title for comparison (lowercase, trim, remove extra spaces, remove punctuation differences)
+        // More aggressive normalization to catch more duplicates including those with different punctuation
+        const normalizeTitle = (title: string): string => {
+          if (!title) return "";
+          return title
+            .toLowerCase()
+            .trim() // Trim at start
+            .normalize("NFD") // Normalize Unicode characters (é -> e + ´)
+            .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
+            .replace(/\s+/g, " ") // Multiple spaces to single space
+            .replace(/[.,!?;:'"`\-_()\[\]{}]/g, "") // Remove punctuation and special chars
+            .replace(/\s+/g, " ") // Clean up spaces again
+            .trim(); // Trim at end (important - removes leading/trailing spaces after punctuation removal)
+        };
+
+        // Group issues by normalized title
+        const titleGroups = new Map<string, Array<typeof allIssues[0]>>();
+        for (const issue of allIssues) {
+          const normalized = normalizeTitle(issue.title);
+          if (!titleGroups.has(normalized)) {
+            titleGroups.set(normalized, []);
+          }
+          titleGroups.get(normalized)!.push(issue);
+        }
+        
+        // Debug: Show some example titles to verify we're getting all issues
+        console.error(`[RemoveDuplicates] Sample titles (first 10): ${allIssues.slice(0, 10).map(i => `"${i.title}" (${i.state})`).join(", ")}`);
+
+        // Find duplicates (groups with more than 1 issue)
+        const duplicates: Array<{
+          title: string;
+          normalized_title: string;
+          issues: Array<{
+            id: string;
+            identifier: string;
+            url: string;
+            title: string;
+            state: string;
+            description_length: number;
+          }>;
+          keep: {
+            id: string;
+            identifier: string;
+            reason: string;
+          };
+          remove: Array<{
+            id: string;
+            identifier: string;
+            url: string;
+          }>;
+        }> = [];
+
+        for (const [normalizedTitle, issues] of titleGroups.entries()) {
+          if (issues.length > 1) {
+            // Sort issues: prefer open issues, then by description length (more info), then by identifier (older)
+            const sorted = [...issues].sort((a, b) => {
+              // Prefer open issues over closed
+              const aOpen = a.state.toLowerCase() !== "done" && a.state.toLowerCase() !== "canceled";
+              const bOpen = b.state.toLowerCase() !== "done" && b.state.toLowerCase() !== "canceled";
+              if (aOpen !== bOpen) {
+                return aOpen ? -1 : 1;
+              }
+              // Prefer issues with more description
+              const aDescLen = a.description?.length || 0;
+              const bDescLen = b.description?.length || 0;
+              if (aDescLen !== bDescLen) {
+                return bDescLen - aDescLen;
+              }
+              // Prefer older issues (lower identifier number)
+              return a.identifier.localeCompare(b.identifier);
+            });
+
+            const keep = sorted[0];
+            const remove = sorted.slice(1);
+
+            duplicates.push({
+              title: keep.title,
+              normalized_title: normalizedTitle,
+              issues: sorted.map(i => ({
+                id: i.id,
+                identifier: i.identifier,
+                url: i.url,
+                title: i.title,
+                state: i.state,
+                description_length: i.description?.length || 0,
+              })),
+              keep: {
+                id: keep.id,
+                identifier: keep.identifier,
+                reason: sorted.length > 1 && sorted[0].state.toLowerCase() !== "done" && sorted[0].state.toLowerCase() !== "canceled"
+                  ? "Open issue"
+                  : sorted[0].description && sorted[0].description.length > (sorted[1]?.description?.length || 0)
+                    ? "More detailed description"
+                    : "Oldest issue",
+              },
+              remove: remove.map(i => ({
+                id: i.id,
+                identifier: i.identifier,
+                url: i.url,
+              })),
+            });
+          }
+        }
+
+        console.error(`[RemoveDuplicates] Found ${duplicates.length} sets of duplicates (${duplicates.reduce((sum, d) => sum + d.remove.length, 0)} issues to remove)`);
+        console.error(`[RemoveDuplicates] Total title groups: ${titleGroups.size}, Groups with duplicates: ${duplicates.length}`);
+
+        // If show_all_titles is true, show all titles grouped by normalized title
+        if (show_all_titles) {
+          // Show groups with 2+ issues first, then all others
+          const duplicateGroups = Array.from(titleGroups.entries())
+            .filter(([_, issues]) => issues.length > 1)
+            .map(([normalized, issues]) => ({
+              normalized_title: normalized,
+              count: issues.length,
+              issues: issues.map(i => ({
+                identifier: i.identifier,
+                title: i.title,
+                state: i.state,
+                url: i.url,
+              })),
+            }))
+            .sort((a, b) => b.count - a.count);
+
+          const singleGroups = Array.from(titleGroups.entries())
+            .filter(([_, issues]) => issues.length === 1)
+            .map(([normalized, issues]) => ({
+              normalized_title: normalized,
+              count: 1,
+              issues: issues.map(i => ({
+                identifier: i.identifier,
+                title: i.title,
+                state: i.state,
+                url: i.url,
+              })),
+            }))
+            .slice(0, 50); // Limit to first 50 for readability
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                debug_mode: true,
+                message: `Showing all ${allIssues.length} issues grouped by normalized title.`,
+                total_issues: allIssues.length,
+                duplicate_groups: duplicateGroups,
+                sample_single_groups: singleGroups,
+                note: "Groups with count > 1 are exact duplicates. Check 'duplicate_groups' array above.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (dry_run && duplicates.length === 0) {
+          // If no duplicates found, show a helpful message with some sample titles
+          const sampleTitles = Array.from(titleGroups.entries())
+            .slice(0, 20)
+            .map(([normalized, issues]) => ({
+              normalized: normalized,
+              count: issues.length,
+              titles: issues.map(i => i.title),
+            }));
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                dry_run: true,
+                message: `Found 0 exact duplicates. Showing sample of normalized titles for debugging.`,
+                total_issues: allIssues.length,
+                total_title_groups: titleGroups.size,
+                sample_titles: sampleTitles,
+                note: "If you see duplicates in Linear, they might have slightly different titles. Use show_all_titles=true to see all titles grouped.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (dry_run) {
+          const titleGroupsArray = Array.from(titleGroups.entries())
+            .map(([normalized, issues]) => ({
+              normalized_title: normalized,
+              count: issues.length,
+              issues: issues.map(i => ({
+                identifier: i.identifier,
+                title: i.title,
+                state: i.state,
+                url: i.url,
+              })),
+            }))
+            .sort((a, b) => b.count - a.count); // Sort by count (most duplicates first)
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                debug_mode: true,
+                message: `Showing all ${allIssues.length} issues grouped by normalized title. Look for groups with count > 1.`,
+                total_issues: allIssues.length,
+                title_groups: titleGroupsArray,
+                duplicates_found: duplicates.length,
+                note: "Groups with count > 1 are exact duplicates. Similar titles with count = 1 might be near-duplicates.",
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (dry_run) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                dry_run: true,
+                message: `Found ${duplicates.length} sets of duplicates. ${duplicates.reduce((sum, d) => sum + d.remove.length, 0)} issues would be removed.`,
+                total_duplicate_sets: duplicates.length,
+                total_issues_to_remove: duplicates.reduce((sum, d) => sum + d.remove.length, 0),
+                duplicates: duplicates.map(d => ({
+                  title: d.title,
+                  keep: d.keep,
+                  remove: d.remove,
+                  all_issues: d.issues,
+                })),
+                note: "Set dry_run=false to actually remove duplicates",
+              }, null, 2),
+            }],
+          };
+        }
+
+        // Actually delete duplicates
+        const deleted: Array<{ id: string; identifier: string; url: string }> = [];
+        const errors: Array<{ id: string; identifier: string; error: string }> = [];
+
+        for (const dup of duplicates) {
+          for (const issueToRemove of dup.remove) {
+            try {
+              // Linear uses soft delete (trash) - issues can be recovered
+              // Use issueArchive for safer deletion, or issueDelete for permanent removal
+              // We'll use issueArchive which moves to trash
+              const archiveQuery = `
+                mutation ArchiveIssue($id: String!) {
+                  issueArchive(id: $id) {
+                    success
+                  }
+                }
+              `;
+
+              const response = await fetch("https://api.linear.app/graphql", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": process.env.PM_TOOL_API_KEY!,
+                },
+                body: JSON.stringify({
+                  query: archiveQuery,
+                  variables: { id: issueToRemove.id },
+                }),
+              });
+
+              const result = await response.json() as {
+                data?: { issueArchive?: { success: boolean } };
+                errors?: Array<{ message: string }>;
+              };
+
+              if (result.data?.issueArchive?.success) {
+                deleted.push(issueToRemove);
+                console.error(`[RemoveDuplicates] Deleted ${issueToRemove.identifier}: ${issueToRemove.url}`);
+              } else {
+                const errorMsg = result.errors?.map(e => e.message).join(", ") || "Unknown error";
+                errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: errorMsg });
+                console.error(`[RemoveDuplicates] Failed to delete ${issueToRemove.identifier}: ${errorMsg}`);
+              }
+            } catch (error) {
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: errorMsg });
+              console.error(`[RemoveDuplicates] Error deleting ${issueToRemove.identifier}:`, error);
+            }
+          }
+        }
+
+        // Update database to remove references to deleted issues
+        if (deleted.length > 0) {
+          try {
+            const { prisma } = await import("../storage/db/prisma.js");
+            const deletedIds = new Set(deleted.map(d => d.id));
+
+            // Update GitHub issues
+            await prisma.gitHubIssue.updateMany({
+              where: { linearIssueId: { in: Array.from(deletedIds) } },
+              data: {
+                exportStatus: "pending",
+                exportedAt: null,
+                linearIssueId: null,
+                linearIssueUrl: null,
+                linearIssueIdentifier: null,
+              },
+            });
+
+            // Update groups
+            await prisma.group.updateMany({
+              where: { linearIssueId: { in: Array.from(deletedIds) } },
+              data: {
+                status: "pending",
+                exportedAt: null,
+                linearIssueId: null,
+                linearIssueUrl: null,
+                linearIssueIdentifier: null,
+              },
+            });
+
+            console.error(`[RemoveDuplicates] Updated database to remove references to ${deleted.length} deleted issues`);
+          } catch (error) {
+            console.error(`[RemoveDuplicates] Error updating database:`, error);
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              dry_run: false,
+              message: `Removed ${deleted.length} duplicate issues. ${errors.length} errors.`,
+              total_duplicate_sets: duplicates.length,
+              deleted: deleted.map(d => ({
+                identifier: d.identifier,
+                url: d.url,
+              })),
+              errors: errors.length > 0 ? errors : undefined,
+              kept: duplicates.map(d => d.keep),
+            }, null, 2),
+          }],
+        };
+
+      } catch (error) {
+        throw new Error(`Remove duplicates failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     case "export_stats": {
       try {
         const { hasDatabaseConfig, getStorage } = await import("../storage/factory.js");
@@ -9037,7 +9541,7 @@ Example output:
           defaultAssigneeId: default_assignee_id,
         });
 
-        console.error(`[PR Sync] Completed: ${summary.updated} updated, ${summary.unchanged} unchanged, ${summary.skipped} skipped, ${summary.errors} errors`);
+        console.error(`[PR Sync] Completed: ${summary.updated} updated (${summary.setToInProgress} In Progress, ${summary.setToReview} Review), ${summary.unchanged} unchanged, ${summary.skipped} skipped, ${summary.errors} errors`);
 
         return {
           content: [{
@@ -9046,11 +9550,13 @@ Example output:
               success: summary.errors === 0,
               dry_run,
               message: dry_run 
-                ? `[DRY RUN] Would update ${summary.updated} Linear issues to In Progress`
-                : `Updated ${summary.updated} Linear issues to In Progress`,
+                ? `[DRY RUN] Would update ${summary.updated} Linear issues (${summary.setToInProgress} In Progress, ${summary.setToReview} Review)`
+                : `Updated ${summary.updated} Linear issues (${summary.setToInProgress} In Progress, ${summary.setToReview} Review)`,
               summary: {
                 total_issues: summary.totalIssues,
                 updated: summary.updated,
+                set_to_in_progress: summary.setToInProgress,
+                set_to_review: summary.setToReview,
                 unchanged: summary.unchanged,
                 skipped: summary.skipped,
                 errors: summary.errors,
@@ -9114,7 +9620,7 @@ Example output:
           defaultAssigneeId: default_assignee_id,
         });
 
-        console.error(`[Combined Sync] Workflow complete: ${result.summary.totalUpdated} total updates (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`);
+        console.error(`[Combined Sync] Workflow complete: ${result.summary.totalUpdated} total updates (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done, ${result.summary.ticketsMarkedAsReview} Review)`);
 
         return {
           content: [{
@@ -9123,12 +9629,14 @@ Example output:
               success: result.success,
               dry_run: result.dryRun,
               message: result.dryRun
-                ? `[DRY RUN] Would update ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`
-                : `Updated ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done)`,
+                ? `[DRY RUN] Would update ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done, ${result.summary.ticketsMarkedAsReview} Review)`
+                : `Updated ${result.summary.totalUpdated} Linear issues (${result.summary.issuesSetToInProgress} In Progress, ${result.summary.ticketsMarkedAsDone} Done, ${result.summary.ticketsMarkedAsReview} Review)`,
               summary: result.summary,
               pr_sync: {
                 total_issues: result.prSync.totalIssues,
                 updated: result.prSync.updated,
+                set_to_in_progress: result.prSync.setToInProgress,
+                set_to_review: result.prSync.setToReview,
                 unchanged: result.prSync.unchanged,
                 skipped: result.prSync.skipped,
                 errors: result.prSync.errors,
@@ -9136,6 +9644,7 @@ Example output:
               linear_sync: {
                 total_tickets: result.linearSync.totalLinearTickets,
                 marked_done: result.linearSync.markedDone,
+                marked_review: result.linearSync.markedReview || 0,
                 unchanged: result.linearSync.unchanged,
                 skipped_no_links: result.linearSync.skippedNoLinks,
                 errors: result.linearSync.errors,

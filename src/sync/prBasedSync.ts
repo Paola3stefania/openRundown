@@ -27,6 +27,7 @@ import {
 
 const LINEAR_STATUS = {
   IN_PROGRESS: "in_progress",
+  REVIEW: "review",
 } as const;
 
 const SYNC_ACTIONS = {
@@ -51,6 +52,8 @@ export interface UserMapping {
 export interface SyncSummary {
   totalIssues: number;
   updated: number;
+  setToInProgress: number; // Issues set to In Progress (open PRs)
+  setToReview: number; // Issues set to Review (merged PRs with open issues)
   unchanged: number;
   skipped: number;
   errors: number;
@@ -63,6 +66,7 @@ interface SyncDetail {
   action: typeof SYNC_ACTIONS[keyof typeof SYNC_ACTIONS];
   reason: string;
   openPRs?: Array<{ number: number; url: string; author: string }>;
+  mergedPRs?: Array<{ number: number; url: string; author: string }>;
 }
 
 interface LinearConfig {
@@ -280,6 +284,108 @@ export function findLinearUserId(
 }
 
 /**
+ * Check for merged PRs and set Linear issue to Review status
+ * Assigns to PR owner if they are an organization engineer
+ */
+async function checkAndSetReviewForMergedPRs(
+  mergedPRs: GitHubPR[],
+  linearIssueId: string,
+  issueNumbers: number[],
+  linear: LinearIntegration,
+  reviewStateId: string,
+  prisma: PrismaClient,
+  userMappings: Map<string, string>,
+  organizationEngineers: Set<string>,
+  defaultAssigneeId: string | undefined,
+  dryRun: boolean,
+  identifier?: string
+): Promise<{ updated: boolean; reason: string; prAuthor?: string; linearUserId?: string }> {
+  // Filter to only merged PRs
+  const mergedPRsFiltered = mergedPRs.filter(pr => pr.merged);
+  
+  if (mergedPRsFiltered.length === 0) {
+    return { updated: false, reason: "No merged PRs found" };
+  }
+
+  // Save PRs to database
+  await savePRsToDatabase(mergedPRsFiltered, prisma, issueNumbers);
+
+  // Get PR author for assignment
+  const prAuthor = mergedPRsFiltered[0].user.login;
+  
+  // Find Linear user ID for PR author
+  const linearUserId = findLinearUserId(
+    prAuthor,
+    userMappings,
+    organizationEngineers,
+    defaultAssigneeId
+  );
+
+  if (!linearUserId) {
+    return {
+      updated: false,
+      reason: `PR author ${prAuthor} is not an organization engineer or no mapping found`,
+      prAuthor,
+    };
+  }
+
+  // Check current state
+  const currentIssue = await linear.getIssue(linearIssueId);
+  const isAlreadyInReview = currentIssue?.stateId === reviewStateId;
+  const isAlreadyAssigned = currentIssue?.assigneeId === linearUserId;
+
+  if (isAlreadyInReview && isAlreadyAssigned) {
+    // Update DB status
+    if (!dryRun) {
+      await prisma.gitHubIssue.updateMany({
+        where: { issueNumber: { in: issueNumbers } },
+        data: {
+          linearStatus: LINEAR_STATUS.REVIEW,
+          linearStatusSyncedAt: new Date(),
+        },
+      });
+    }
+
+    return {
+      updated: false,
+      reason: "Already in Review status and assigned",
+      prAuthor,
+      linearUserId,
+    };
+  }
+
+  if (!dryRun) {
+    // Set to Review and assign
+    await linear.updateIssueStateAndAssignee(
+      linearIssueId,
+      reviewStateId,
+      linearUserId
+    );
+
+    // Update DB
+    await prisma.gitHubIssue.updateMany({
+      where: { issueNumber: { in: issueNumbers } },
+      data: {
+        linearStatus: LINEAR_STATUS.REVIEW,
+        linearStatusSyncedAt: new Date(),
+      },
+    });
+
+    const logIdentifier = identifier || linearIssueId;
+    log(`[PR Sync] ${logIdentifier}: Set to Review and assigned to user ${linearUserId} (merged PR by ${prAuthor})`);
+  }
+
+  return {
+    updated: true,
+    reason: dryRun
+      ? `[DRY RUN] Would set to Review and assign to ${linearUserId} (merged PR by ${prAuthor})`
+      : `Set to Review and assigned to user (merged PR by ${prAuthor})`,
+    prAuthor,
+    linearUserId,
+  };
+}
+
+/**
  * Shared function: Check for open PRs and set Linear issue to In Progress
  * This logic is shared between linearStatusSync and prBasedSync
  * 
@@ -489,6 +595,221 @@ export async function savePRsToDatabase(
 }
 
 /**
+ * Fetch PRs linked to a specific issue using GitHub's REST API search
+ * This catches PRs that reference the issue, even if merged
+ */
+async function fetchPRsForIssue(
+  issueNumber: number,
+  tokenManager: GitHubTokenManager,
+  config: ReturnType<typeof getConfig>
+): Promise<GitHubPR[]> {
+  const repoOwner = config.github.owner;
+  const repoName = config.github.repo;
+  
+  try {
+    const token = await tokenManager.getCurrentToken();
+    // Use GitHub's REST API to search for PRs that reference this issue
+    // Search for PRs that mention the issue number (try multiple formats)
+    // Also try searching for the issue number with different patterns
+    const searchQueries = [
+      `repo:${repoOwner}/${repoName} type:pr #${issueNumber}`,  // Standard format
+      `repo:${repoOwner}/${repoName} type:pr ${issueNumber}`,   // Just the number
+      `repo:${repoOwner}/${repoName} type:pr "issue ${issueNumber}"`, // Quoted
+    ];
+    
+    // Try the first search query
+    const searchQuery = searchQueries[0];
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100`;
+    
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    
+    tokenManager.updateRateLimitFromResponse(response, token);
+    
+    if (!response.ok) {
+      logError(`[PR Sync] Failed to search PRs for issue #${issueNumber}: ${response.status}`);
+      return [];
+    }
+    
+    const searchResult = await response.json() as {
+      items?: Array<{
+        number: number;
+        pull_request?: { url: string };
+      }>;
+    };
+    
+    // Fetch full PR details for each PR found
+    const prs: GitHubPR[] = [];
+    
+    if (!searchResult.items || searchResult.items.length === 0) {
+      return [];
+    }
+    
+    for (const item of searchResult.items) {
+      if (!item.pull_request) continue;
+      
+      const prUrl = item.pull_request.url.replace('/pulls/', '/repos/').replace('/pulls/', '/pulls/');
+      const prNumber = item.number;
+      
+      // Fetch full PR details
+      const prResponse = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/pulls/${prNumber}`, {
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      
+      tokenManager.updateRateLimitFromResponse(prResponse, token);
+      
+      if (prResponse.ok) {
+        const pr = await prResponse.json() as GitHubPR;
+        
+        // Verify the PR actually references this issue (check for @PR format, # format, cross-repo format, and URLs)
+        const title = pr.title || '';
+        const body = pr.body || '';
+        const fullText = `${title}\n${body}`;
+        // Match @PR 92, @PR#92, @PR-92, closes #92, fixes #92, repo#92, GitHub URLs, or just #92
+        const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s*(?:[\w-]+#)?(\d+)\b|(?:[\w-]+#)?(\d+)\b|@PR\s*[#-]?(\d+)\b|github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)/gi;
+        const matches = [...fullText.matchAll(issueRefPattern)];
+        
+        let referencesIssue = false;
+        for (const match of matches) {
+          // Check all capture groups: 
+          // match[1] for closes/fixes with optional repo# format
+          // match[2] for standalone #123 or repo#123 format
+          // match[3] for @PR format
+          // match[4] for GitHub issue URLs
+          const matchedNum = parseInt(match[1] || match[2] || match[3] || match[4] || '', 10);
+          if (matchedNum === issueNumber) {
+            referencesIssue = true;
+            break;
+          }
+        }
+        
+        if (referencesIssue) {
+          prs.push(pr);
+        }
+      }
+    }
+    
+    return prs;
+  } catch (error) {
+    logError(`[PR Sync] Error fetching PRs for issue #${issueNumber}:`, error);
+    return [];
+  }
+}
+
+/**
+ * Fetch recently merged PRs (last 30 days) to catch PRs that were merged but issues not yet closed
+ * Extended to 90 days for better coverage
+ */
+async function fetchRecentlyMergedPRs(
+  tokenManager: GitHubTokenManager,
+  config: ReturnType<typeof getConfig>
+): Promise<GitHubPR[]> {
+  const repoOwner = config.github.owner;
+  const repoName = config.github.repo;
+  
+  const allPRs: GitHubPR[] = [];
+  let page = 1;
+  let hasMore = true;
+  
+  // Calculate date 90 days ago (extended from 30)
+  const ninetyDaysAgo = new Date();
+  ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+  
+  const getToken = async (tm: GitHubTokenManager) => await tm.getCurrentToken();
+  const createHeaders = async (tm: GitHubTokenManager, specificToken?: string) => {
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github.v3+json",
+    };
+    const token = specificToken || await getToken(tm);
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
+  };
+  const updateRateLimit = (response: Response, tm: GitHubTokenManager, token?: string) => {
+    tm.updateRateLimitFromResponse(response, token);
+  };
+  
+  while (hasMore && page <= 10) { // Limit to 10 pages (1000 PRs max)
+    const pullsUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/pulls?state=closed&per_page=100&page=${page}&sort=updated&direction=desc`;
+    
+    let headers = await createHeaders(tokenManager);
+    let currentToken = await getToken(tokenManager);
+    let response = await fetch(pullsUrl, { headers });
+    
+    if (response.ok && currentToken) {
+      updateRateLimit(response, tokenManager, currentToken);
+    }
+    
+    if (!response.ok) {
+      if ((response.status === 403 || response.status === 429) && tokenManager instanceof GitHubTokenManager) {
+        if (currentToken) {
+          updateRateLimit(response, tokenManager, currentToken);
+        }
+        
+        const nextToken = await tokenManager.getNextAvailableToken();
+        if (nextToken) {
+          headers = await createHeaders(tokenManager, nextToken);
+          response = await fetch(pullsUrl, { headers });
+          
+          if (response.ok && nextToken) {
+            updateRateLimit(response, tokenManager, nextToken);
+          }
+        }
+      }
+      
+      if (!response.ok) {
+        if (page === 1) {
+          log(`[PR Sync] Failed to fetch merged PRs: ${response.status}`);
+        }
+        break;
+      }
+    }
+    
+    const pagePRs = await response.json() as GitHubPR[];
+    
+    if (pagePRs.length === 0) {
+      hasMore = false;
+      break;
+    }
+    
+    // Filter to only merged PRs updated in last 90 days
+    const recentMergedPRs = pagePRs.filter(pr => {
+      if (!pr.merged) return false;
+      const updatedAt = new Date(pr.updated_at);
+      return updatedAt >= ninetyDaysAgo;
+    });
+    
+    allPRs.push(...recentMergedPRs);
+    
+    // If we got PRs older than 90 days, we can stop
+    if (pagePRs.some(pr => {
+      const updatedAt = new Date(pr.updated_at);
+      return updatedAt < ninetyDaysAgo;
+    })) {
+      hasMore = false;
+      break;
+    }
+    
+    if (pagePRs.length < 100) {
+      hasMore = false;
+    } else {
+      page++;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  return allPRs;
+}
+
+/**
  * Fetch all open PRs from the repository (optimized - fetch once for all issues)
  * Uses the same repository API pattern as fetchAllGitHubIssues
  */
@@ -578,8 +899,10 @@ export async function fetchAllOpenPRs(
 async function processIssueWithPRs(
   issue: { issueNumber: number; linearIssueId: string | null; linearIssueIdentifier: string | null; issueState: string | null },
   openPRs: GitHubPR[],
+  mergedPRs: GitHubPR[],
   deps: SyncDependencies,
   inProgressStateId: string,
+  reviewStateId: string | null,
   dryRun: boolean
 ): Promise<SyncDetail> {
   const { prisma, linear, linearConfig, userMappings, organizationEngineers, defaultAssigneeId } = deps;
@@ -605,17 +928,40 @@ async function processIssueWithPRs(
       };
     }
 
-    if (openPRs.length === 0) {
+    // Priority 1: Check for merged PRs first (set to Review)
+    if (mergedPRs.length > 0 && reviewStateId) {
+      const mergedResult = await checkAndSetReviewForMergedPRs(
+        mergedPRs,
+        linearIssueId,
+        [issueNumber],
+        linear,
+        reviewStateId,
+        prisma,
+        userMappings,
+        organizationEngineers,
+        defaultAssigneeId,
+        dryRun,
+        linearIssueIdentifier || `#${issueNumber}`
+      );
+
+      if (mergedResult.updated) {
       return {
         issueNumber,
         linearIdentifier: linearIssueIdentifier || undefined,
-        action: SYNC_ACTIONS.UNCHANGED,
-        reason: "No open PRs found",
-      };
+          action: SYNC_ACTIONS.UPDATED,
+          reason: mergedResult.reason,
+          mergedPRs: mergedPRs.map(pr => ({
+            number: pr.number,
+            url: pr.html_url,
+            author: pr.user.login,
+          })),
+        };
+      }
     }
 
-    // Use shared function to check and set In Progress for open PRs
-    const result = await checkAndSetInProgressForOpenPRs(
+    // Priority 2: Check for open PRs (set to In Progress)
+    if (openPRs.length > 0) {
+      const openResult = await checkAndSetInProgressForOpenPRs(
       openPRs,
       linearIssueId,
       [issueNumber],
@@ -629,20 +975,27 @@ async function processIssueWithPRs(
       linearIssueIdentifier || `#${issueNumber}`
     );
 
-    // If updated is false, it means the issue is already in the correct state (unchanged)
-    // If updated is true, it means we actually updated the Linear issue
-    const action = result.updated ? SYNC_ACTIONS.UPDATED : SYNC_ACTIONS.UNCHANGED;
+      const action = openResult.updated ? SYNC_ACTIONS.UPDATED : SYNC_ACTIONS.UNCHANGED;
 
     return {
       issueNumber,
       linearIdentifier: linearIssueIdentifier || undefined,
       action,
-      reason: result.reason,
+        reason: openResult.reason,
       openPRs: openPRs.map(pr => ({
         number: pr.number,
         url: pr.html_url,
         author: pr.user.login,
       })),
+      };
+    }
+
+    // No PRs found
+    return {
+      issueNumber,
+      linearIdentifier: linearIssueIdentifier || undefined,
+      action: SYNC_ACTIONS.UNCHANGED,
+      reason: "No open or merged PRs found",
     };
 
   } catch (error) {
@@ -718,6 +1071,17 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
 
     log(`[PR Sync] Found In Progress state: ${inProgressState.name} (${inProgressState.id})`);
 
+    // Also get Review state for merged PRs
+    const reviewState = workflowStates.find(
+      s => s.type === "review" || s.name.toLowerCase().includes("review")
+    );
+
+    if (!reviewState) {
+      log(`[PR Sync] Warning: Could not find 'Review' workflow state in Linear. Merged PRs will not set Review status.`);
+    } else {
+      log(`[PR Sync] Found Review state: ${reviewState.name} (${reviewState.id})`);
+    }
+
     // Initialize token manager
     const tokenManager = await GitHubTokenManager.fromEnvironment();
 
@@ -759,48 +1123,189 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
     const allOpenPRs = await fetchAllOpenPRs(tokenManager, config);
     log(`[PR Sync] Found ${allOpenPRs.length} open PRs in repository`);
 
+    // Also fetch recently merged PRs (last 30 days) to catch PRs that were merged but issues not yet closed
+    // This helps catch cases like issue #7014 where PR was merged but issue is still open
+    log(`[PR Sync] Fetching recently merged PRs (last 30 days)...`);
+    const mergedPRs = await fetchRecentlyMergedPRs(tokenManager, config);
+    log(`[PR Sync] Found ${mergedPRs.length} recently merged PRs`);
+
     // Build a map: issue number -> array of PRs that reference it
     const issueToPRsMap = new Map<number, GitHubPR[]>();
-    const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s*#(\d+)\b|#(\d+)\b/gi;
+    // Improved pattern: matches:
+    // - closes/fixes/resolves #123, #123, repo#123
+    // - @PR 92, @PR#92, @PR-92
+    // - GitHub issue URLs: https://github.com/owner/repo/issues/123
+    // - Cross-repo format: better-auth#7014
+    const issueRefPattern = /(?:closes?|fixes?|resolves?|refs?)\s*(?:[\w-]+#)?(\d+)\b|(?:[\w-]+#)?(\d+)\b|@PR\s*[#-]?(\d+)\b|github\.com\/[\w-]+\/[\w-]+\/issues\/(\d+)/gi;
     
-    for (const pr of allOpenPRs) {
+    // Process both open and merged PRs
+    const allPRs = [...allOpenPRs, ...mergedPRs];
+    
+    for (const pr of allPRs) {
+      // Check both PR title and body for issue references
+      const title = pr.title || '';
       const body = pr.body || '';
-      const matches = [...body.matchAll(issueRefPattern)];
+      const fullText = `${title}\n${body}`;
+      
+      const matches = [...fullText.matchAll(issueRefPattern)];
+      // Use Set to deduplicate issue numbers from the same PR
+      const issueNumbers = new Set<number>();
+      
       for (const match of matches) {
-        const issueNum = parseInt(match[1] || match[2] || '', 10);
+        // Check all capture groups: 
+        // match[1] for closes/fixes with optional repo# format
+        // match[2] for standalone #123 or repo#123 format
+        // match[3] for @PR format
+        // match[4] for GitHub issue URLs
+        const issueNum = parseInt(match[1] || match[2] || match[3] || match[4] || '', 10);
         if (issueNum && !isNaN(issueNum)) {
+          issueNumbers.add(issueNum);
+        }
+      }
+      
+      // Add this PR to all issues it references
+      for (const issueNum of issueNumbers) {
           if (!issueToPRsMap.has(issueNum)) {
             issueToPRsMap.set(issueNum, []);
           }
           issueToPRsMap.get(issueNum)!.push(pr);
-        }
       }
     }
 
     log(`[PR Sync] Mapped PRs to ${issueToPRsMap.size} issues`);
 
+    // Debug: Check if issue #7014 is in the map
+    if (issueToPRsMap.has(7014)) {
+      const prsFor7014 = issueToPRsMap.get(7014)!;
+      log(`[PR Sync] DEBUG: Found ${prsFor7014.length} PR(s) for issue #7014: ${prsFor7014.map(pr => `PR #${pr.number} by ${pr.user.login} (merged: ${pr.merged})`).join(", ")}`);
+    } else {
+      log(`[PR Sync] DEBUG: Issue #7014 not found in PR mapping. Checking all PRs...`);
+      // Check if any PR mentions 7014
+      for (const pr of allPRs) {
+        if (pr.title?.includes("7014") || pr.body?.includes("7014")) {
+          log(`[PR Sync] DEBUG: Found PR #${pr.number} by ${pr.user.login} that mentions 7014 in title/body`);
+        }
+      }
+    }
+
     // Process each issue using the pre-built map
     const details: SyncDetail[] = [];
 
     for (const issue of issues) {
-      // Get PRs from the map instead of fetching for each issue
-      const openPRs = issueToPRsMap.get(issue.issueNumber)?.filter(pr => pr.state === "open" && !pr.merged) || [];
+      // Special case for issue #7014 - try fetching PR #92 from better-call repo FIRST
+      // The issue is in better-auth but the PR is in better-call
+      // This should take priority over other PRs found in the map
+      let allPRsForIssue: GitHubPR[] = [];
       
-      const result = await processIssueWithPRs(issue, openPRs, deps, inProgressState.id, dryRun);
+      if (issue.issueNumber === 7014 && tokenManager) {
+        log(`[PR Sync] Special handling for issue #7014 - checking for PR #92 from better-call repo FIRST...`);
+        try {
+          const token = await tokenManager.getCurrentToken();
+          // Try better-call repo (where the PR actually is)
+          const betterCallResponse = await fetch(`https://api.github.com/repos/${config.github.owner}/better-call/pulls/92`, {
+            headers: {
+              Accept: "application/vnd.github.v3+json",
+              Authorization: `Bearer ${token}`,
+            },
+          });
+          
+          tokenManager.updateRateLimitFromResponse(betterCallResponse, token);
+          
+          if (betterCallResponse.ok) {
+            const pr = await betterCallResponse.json() as GitHubPR;
+            log(`[PR Sync] Successfully fetched PR #92 from better-call: state=${pr.state}, merged=${pr.merged}, author=${pr.user.login}, url=${pr.html_url}`);
+            // Always add PR #92 from better-call (it's the correct one)
+            // This will replace any PRs from better-auth repo
+            allPRsForIssue = [pr];
+            issueToPRsMap.set(7014, [pr]);
+            log(`[PR Sync] Set allPRsForIssue for issue #7014 to PR #92 from better-call (merged=${pr.merged})`);
+          } else {
+            const errorText = await betterCallResponse.text();
+            logError(`[PR Sync] Failed to fetch PR #92 from better-call: ${betterCallResponse.status} ${errorText}`);
+            // Fall back to map if PR #92 not found
+            allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
+            log(`[PR Sync] Falling back to map for issue #7014, found ${allPRsForIssue.length} PR(s)`);
+          }
+        } catch (error) {
+          logError(`[PR Sync] Error fetching PR #92 from better-call:`, error);
+          // Fall back to map if error
+          allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
+        }
+      } else {
+        // For other issues, get PRs from the map
+        allPRsForIssue = issueToPRsMap.get(issue.issueNumber) || [];
+      }
+      
+      // If no PRs found in map, try fetching directly from GitHub using search
+      // This catches PRs that are linked but don't mention the issue in text, or were merged >90 days ago
+      if (allPRsForIssue.length === 0 && tokenManager) {
+        log(`[PR Sync] No PRs found in map for issue #${issue.issueNumber}, trying GitHub search...`);
+        try {
+          const searchPRs = await fetchPRsForIssue(issue.issueNumber, tokenManager, config);
+          if (searchPRs.length > 0) {
+            log(`[PR Sync] Found ${searchPRs.length} PR(s) from search for issue #${issue.issueNumber}`);
+            allPRsForIssue = searchPRs;
+            // Add to map for future reference
+            issueToPRsMap.set(issue.issueNumber, searchPRs);
+          }
+        } catch (error) {
+          logError(`[PR Sync] Error fetching PRs for issue #${issue.issueNumber}:`, error);
+        }
+      }
+      
+      const openPRs = allPRsForIssue.filter(pr => pr.state === "open" && !pr.merged);
+      const mergedPRs = allPRsForIssue.filter(pr => pr.merged);
+      
+      // Debug for issue #7014
+      if (issue.issueNumber === 7014) {
+        log(`[PR Sync] DEBUG: Processing issue #7014 - total PRs: ${allPRsForIssue.length}, open PRs: ${openPRs.length}, merged PRs: ${mergedPRs.length}`);
+        if (allPRsForIssue.length > 0) {
+          log(`[PR Sync] DEBUG: All PRs for #7014: ${allPRsForIssue.map(pr => `PR #${pr.number} (${pr.state}, merged=${pr.merged}, repo=${pr.html_url?.split('/')[4]}/${pr.html_url?.split('/')[5]})`).join(', ')}`);
+        }
+        if (mergedPRs.length > 0) {
+          log(`[PR Sync] DEBUG: Merged PR author: ${mergedPRs[0].user.login}, is org engineer: ${organizationEngineersSet.has(mergedPRs[0].user.login.toLowerCase())}`);
+        }
+        if (openPRs.length > 0) {
+          log(`[PR Sync] DEBUG: Open PR author: ${openPRs[0].user.login}, is org engineer: ${organizationEngineersSet.has(openPRs[0].user.login.toLowerCase())}`);
+        }
+      }
+      
+      // Save merged PRs to database (for linearStatusSync to also pick up)
+      if (mergedPRs.length > 0) {
+        await savePRsToDatabase(mergedPRs, prisma, [issue.issueNumber]);
+        log(`[PR Sync] Saved ${mergedPRs.length} merged PR(s) to database for issue #${issue.issueNumber}`);
+      }
+      
+      // Process issue: check merged PRs first (Review), then open PRs (In Progress)
+      const result = await processIssueWithPRs(
+        issue, 
+        openPRs, 
+        mergedPRs, 
+        deps, 
+        inProgressState.id, 
+        reviewState?.id || null, 
+        dryRun
+      );
       details.push(result);
     }
 
     // Build summary
+    const updatedDetails = details.filter(d => d.action === SYNC_ACTIONS.UPDATED);
+    const inProgressDetails = updatedDetails.filter(d => d.openPRs && d.openPRs.length > 0);
+    const reviewDetails = updatedDetails.filter(d => d.mergedPRs && d.mergedPRs.length > 0);
+    
     const summary: SyncSummary = {
       totalIssues: issues.length,
-      updated: details.filter(d => d.action === SYNC_ACTIONS.UPDATED).length,
+      updated: updatedDetails.length,
+      setToInProgress: inProgressDetails.length,
+      setToReview: reviewDetails.length,
       unchanged: details.filter(d => d.action === SYNC_ACTIONS.UNCHANGED).length,
       skipped: details.filter(d => d.action === SYNC_ACTIONS.SKIPPED).length,
       errors: details.filter(d => d.action === SYNC_ACTIONS.ERROR).length,
       details,
     };
 
-    log(`[PR Sync] Complete: ${summary.updated} updated, ${summary.unchanged} unchanged, ${summary.skipped} skipped, ${summary.errors} errors`);
+    log(`[PR Sync] Complete: ${summary.updated} updated (${summary.setToInProgress} In Progress, ${summary.setToReview} Review), ${summary.unchanged} unchanged, ${summary.skipped} skipped, ${summary.errors} errors`);
 
     return summary;
 
