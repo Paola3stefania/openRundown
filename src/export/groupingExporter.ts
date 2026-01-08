@@ -3582,6 +3582,19 @@ export async function exportIssuesToPMTool(
             // Build expected labels from all issues in group
             const allLabels = new Set<string>();
             allLabels.add("issue-group");
+            
+            // Check if group has related Discord threads
+            const groupThreadMatches = await prisma.issueThreadMatch.findMany({
+              where: {
+                issueNumber: { in: groupIssues.map(i => i.issueNumber) },
+              },
+              select: { threadId: true },
+            });
+            const threadIds = [...new Set(groupThreadMatches.map(m => m.threadId))];
+            if (threadIds.length > 0) {
+              allLabels.add("discord");
+            }
+            
             for (const issue of groupIssues) {
               issue.issueLabels?.forEach(l => allLabels.add(l));
               issue.detectedLabels?.forEach(l => allLabels.add(l));
@@ -3641,10 +3654,16 @@ export async function exportIssuesToPMTool(
                 hasChanges = true;
               }
               
-              const expectedLabelNames = Array.from(allLabels).sort();
-              const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
-              if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
-                updates.labels = expectedLabelNames;
+              // Merge labels: combine existing Linear labels with expected labels (from GitHub + detected)
+              // Only add new labels, don't remove existing ones
+              const expectedLabelNames = Array.from(allLabels);
+              const currentLabelNames = new Set(currentLinearIssue.labelNames || []);
+              const mergedLabels = new Set([...currentLabelNames, ...expectedLabelNames]);
+              
+              // Only update if there are new labels to add
+              const hasNewLabels = expectedLabelNames.some(label => !currentLabelNames.has(label));
+              if (hasNewLabels) {
+                updates.labels = Array.from(mergedLabels).sort();
                 hasChanges = true;
               }
               
@@ -3733,8 +3752,16 @@ export async function exportIssuesToPMTool(
           try {
             if (!issue.linearIssueId) continue;
             
-            // Build expected labels
+            // Build expected labels - check for Discord thread matches
+            const threadMatches = await prisma.issueThreadMatch.findMany({
+              where: { issueNumber: issue.issueNumber },
+              select: { threadId: true },
+            });
+            
             const labels = [...(issue.issueLabels || []), ...(issue.detectedLabels || [])];
+            if (threadMatches.length > 0) {
+              labels.push("discord");
+            }
             
             // Calculate expected priority
             const expectedPriority = calculatePriority({
@@ -3788,10 +3815,15 @@ export async function exportIssuesToPMTool(
                 hasChanges = true;
               }
               
-              const expectedLabelNames = labels.sort();
-              const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
-              if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
-                updates.labels = expectedLabelNames;
+              // Merge labels: combine existing Linear labels with expected labels (from GitHub + detected)
+              // Only add new labels, don't remove existing ones
+              const currentLabelNames = new Set(currentLinearIssue.labelNames || []);
+              const mergedLabels = new Set([...currentLabelNames, ...labels]);
+              
+              // Only update if there are new labels to add
+              const hasNewLabels = labels.some(label => !currentLabelNames.has(label));
+              if (hasNewLabels) {
+                updates.labels = Array.from(mergedLabels).sort();
                 hasChanges = true;
               }
               
