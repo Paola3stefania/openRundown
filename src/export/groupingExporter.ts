@@ -3277,6 +3277,73 @@ export async function exportIssuesToPMTool(
           }
         }
 
+        // Add PR context - fetch PRs linked to any issue in the group
+        const issueNumbers = groupIssueList.map(i => i.issueNumber);
+        const linkedPRs = await prisma.gitHubPullRequest.findMany({
+          where: {
+            linkedIssues: {
+              some: {
+                issueNumber: { in: issueNumbers },
+              },
+            },
+          },
+          select: {
+            prNumber: true,
+            prUrl: true,
+            prTitle: true,
+            prState: true,
+            prMerged: true,
+            prBody: true,
+            linkedIssues: {
+              select: {
+                issueNumber: true,
+              },
+            },
+          },
+          orderBy: {
+            prCreatedAt: 'desc',
+          },
+        });
+
+        if (linkedPRs.length > 0) {
+          descriptionParts.push("## Related Pull Requests");
+          descriptionParts.push("");
+          
+          for (const pr of linkedPRs) {
+            const prStateLabel = pr.prMerged ? "merged" : pr.prState;
+            const relatedIssueNumbers = pr.linkedIssues.map(i => i.issueNumber);
+            const relatedIssuesText = relatedIssueNumbers.map(num => `#${num}`).join(", ");
+            descriptionParts.push(`- Related to ${relatedIssuesText} - [PR #${pr.prNumber}](${pr.prUrl}) - ${pr.prTitle} (${prStateLabel})`);
+          }
+          
+          // Also check PR bodies for additional issue numbers
+          const additionalIssues = new Set<number>();
+          for (const pr of linkedPRs) {
+            if (pr.prBody) {
+              // Extract issue numbers from PR body (e.g., #6810, closes #6810, fixes #6810)
+              const issueMatches = pr.prBody.matchAll(/#(\d+)/g);
+              for (const match of issueMatches) {
+                const issueNum = parseInt(match[1], 10);
+                if (!issueNumbers.includes(issueNum)) {
+                  additionalIssues.add(issueNum);
+                }
+              }
+            }
+          }
+          
+          if (additionalIssues.size > 0) {
+            descriptionParts.push("");
+            const issueBaseUrl = groupIssueList[0]?.issueUrl?.replace(/\d+$/, "") || "";
+            const relatedIssuesLinks = Array.from(additionalIssues).map(num => {
+              const issueUrl = issueBaseUrl ? `${issueBaseUrl}${num}` : `#${num}`;
+              return `[#${num}](${issueUrl})`;
+            }).join(", ");
+            descriptionParts.push(`**Also relates to:** ${relatedIssuesLinks}`);
+          }
+          
+          descriptionParts.push("");
+        }
+
         // Collect all labels from issues in the group (GitHub labels + detected labels)
         const allLabels = new Set<string>();
         allLabels.add("issue-group");
@@ -3405,6 +3472,65 @@ export async function exportIssuesToPMTool(
             }
             descriptionParts.push("");
           }
+        }
+
+        // Add PR context - fetch PRs linked to this issue
+        const linkedPRs = await prisma.gitHubPullRequest.findMany({
+          where: {
+            linkedIssues: {
+              some: {
+                issueNumber: issue.issueNumber,
+              },
+            },
+          },
+          select: {
+            prNumber: true,
+            prUrl: true,
+            prTitle: true,
+            prState: true,
+            prMerged: true,
+            prBody: true,
+          },
+          orderBy: {
+            prCreatedAt: 'desc',
+          },
+        });
+
+        if (linkedPRs.length > 0) {
+          descriptionParts.push("## Related Pull Requests");
+          descriptionParts.push("");
+          
+          for (const pr of linkedPRs) {
+            const prStateLabel = pr.prMerged ? "merged" : pr.prState;
+            descriptionParts.push(`- Related to [#${issue.issueNumber}](${issue.issueUrl}) - [PR #${pr.prNumber}](${pr.prUrl}) - ${pr.prTitle} (${prStateLabel})`);
+          }
+          
+          // Also check PR bodies for additional issue numbers
+          const additionalIssues = new Set<number>();
+          for (const pr of linkedPRs) {
+            if (pr.prBody) {
+              // Extract issue numbers from PR body (e.g., #6810, closes #6810, fixes #6810)
+              const issueMatches = pr.prBody.matchAll(/#(\d+)/g);
+              for (const match of issueMatches) {
+                const issueNum = parseInt(match[1], 10);
+                if (issueNum !== issue.issueNumber) {
+                  additionalIssues.add(issueNum);
+                }
+              }
+            }
+          }
+          
+          if (additionalIssues.size > 0) {
+            descriptionParts.push("");
+            const issueBaseUrl = issue.issueUrl.replace(String(issue.issueNumber), "");
+            const relatedIssuesLinks = Array.from(additionalIssues).map(num => {
+              const issueUrl = `${issueBaseUrl}${num}`;
+              return `[#${num}](${issueUrl})`;
+            }).join(", ");
+            descriptionParts.push(`**Also relates to:** ${relatedIssuesLinks}`);
+          }
+          
+          descriptionParts.push("");
         }
 
         // Collect labels (GitHub labels + LLM-detected labels from database)
