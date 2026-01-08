@@ -391,7 +391,7 @@ export async function mapGroupsToFeatures(
       const featureKeywords = (feature.related_keywords || []).map(k => k.toLowerCase().trim());
       
       // Step 1: Check GitHub labels for direct feature name matching (ADDITIONAL signal)
-      // If any GitHub label exactly matches a feature name, boost similarity
+      // If any GitHub label exactly matches or contains a feature name, boost similarity
       let labelBasedMatch = false;
       let labelSimilarity = 0;
       for (const label of issueLabelsNormalized) {
@@ -400,7 +400,7 @@ export async function mapGroupsToFeatures(
           .replace(/[:\s]+$/, "")
           .trim();
         
-        // Direct name match (e.g., "social" label matches "social" feature)
+        // Direct exact match (e.g., "social" label matches "social" feature)
         if (labelNormalized === featureNameNormalized || label === featureNameLower) {
           labelBasedMatch = true;
           labelSimilarity = 0.95; // Very high confidence for direct label match
@@ -408,7 +408,28 @@ export async function mapGroupsToFeatures(
           break;
         }
         
-        // Also check if label matches any feature keywords
+        // Partial match: Check if label contains feature name as a word (e.g., "social provider" contains "social")
+        // Split label into words and check if any word matches the feature name
+        const labelWords = labelNormalized.split(/[\s\-_]+/);
+        if (labelWords.includes(featureNameNormalized) || labelWords.includes(featureNameLower)) {
+          labelBasedMatch = true;
+          labelSimilarity = 0.92; // High confidence for partial label match (slightly lower than exact)
+          log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" contains feature name "${feature.name}"`);
+          break;
+        }
+        
+        // Also check if label contains feature name as substring (for cases like "social-provider" or "social_provider")
+        if (labelNormalized.includes(featureNameNormalized) || label.includes(featureNameLower)) {
+          // Only match if feature name is at least 3 characters (avoid false matches like "a" in "label")
+          if (featureNameNormalized.length >= 3) {
+            labelBasedMatch = true;
+            labelSimilarity = 0.90; // High confidence for substring match
+            log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" contains feature name "${feature.name}" as substring`);
+            break;
+          }
+        }
+        
+        // Check if label matches any feature keywords
         for (const keyword of featureKeywords) {
           const keywordNormalized = keyword
             .replace(/^feature[:\s]+/i, "")
@@ -418,6 +439,14 @@ export async function mapGroupsToFeatures(
             labelBasedMatch = true;
             labelSimilarity = 0.9; // High confidence for label-keyword match
             log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" matches feature keyword "${keyword}" for feature "${feature.name}"`);
+            break;
+          }
+          // Also check if label contains keyword as word
+          const keywordWords = labelNormalized.split(/[\s\-_]+/);
+          if (keywordWords.includes(keywordNormalized) || keywordWords.includes(keyword)) {
+            labelBasedMatch = true;
+            labelSimilarity = 0.88; // Good confidence for keyword-in-label match
+            log(`[DEBUG] Group ${group.id}: Label-based match - GitHub label "${label}" contains feature keyword "${keyword}" for feature "${feature.name}"`);
             break;
           }
         }
@@ -1203,7 +1232,7 @@ export async function mapUngroupedIssuesToFeatures(
             .replace(/[:\s]+$/, "")
             .trim();
           
-          // Direct name match (e.g., "social" label matches "social" feature)
+          // Direct exact match (e.g., "social" label matches "social" feature)
           if (labelNormalized === featureNameNormalized || label === featureNameLower) {
             labelBased = true;
             labelSimilarity = 0.95; // Very high confidence for direct label match
@@ -1211,7 +1240,28 @@ export async function mapUngroupedIssuesToFeatures(
             break;
           }
           
-          // Also check if label matches any feature keywords
+          // Partial match: Check if label contains feature name as a word (e.g., "social provider" contains "social")
+          // Split label into words and check if any word matches the feature name
+          const labelWords = labelNormalized.split(/[\s\-_]+/);
+          if (labelWords.includes(featureNameNormalized) || labelWords.includes(featureNameLower)) {
+            labelBased = true;
+            labelSimilarity = 0.92; // High confidence for partial label match (slightly lower than exact)
+            log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" contains feature name "${feature.name}"`);
+            break;
+          }
+          
+          // Also check if label contains feature name as substring (for cases like "social-provider" or "social_provider")
+          if (labelNormalized.includes(featureNameNormalized) || label.includes(featureNameLower)) {
+            // Only match if feature name is at least 3 characters (avoid false matches like "a" in "label")
+            if (featureNameNormalized.length >= 3) {
+              labelBased = true;
+              labelSimilarity = 0.90; // High confidence for substring match
+              log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" contains feature name "${feature.name}" as substring`);
+              break;
+            }
+          }
+          
+          // Check if label matches any feature keywords
           for (const keyword of featureKeywords) {
             const keywordNormalized = keyword
               .replace(/^feature[:\s]+/i, "")
@@ -1221,6 +1271,14 @@ export async function mapUngroupedIssuesToFeatures(
               labelBased = true;
               labelSimilarity = 0.9; // High confidence for label-keyword match
               log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" matches feature keyword "${keyword}" for feature "${feature.name}"`);
+              break;
+            }
+            // Also check if label contains keyword as word
+            const keywordWords = labelNormalized.split(/[\s\-_]+/);
+            if (keywordWords.includes(keywordNormalized) || keywordWords.includes(keyword)) {
+              labelBased = true;
+              labelSimilarity = 0.88; // Good confidence for keyword-in-label match
+              log(`[FeatureMapper] Issue ${data.issue.issue_number}: Label-based match - GitHub label "${label}" contains feature keyword "${keyword}" for feature "${feature.name}"`);
               break;
             }
           }
