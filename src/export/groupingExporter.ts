@@ -3101,6 +3101,48 @@ export async function exportIssuesToPMTool(
     const allIssues = [...groupedIssues, ...ungroupedIssues];
     log(`Total issues to export: ${allIssues.length} (${groupedIssues.length} grouped + ${ungroupedIssues.length} ungrouped)`);
 
+    // =============================================================
+    // STEP 1.5: Ensure all issues are labeled before export
+    // =============================================================
+    const unlabeledIssues = allIssues.filter(issue => !issue.detectedLabels || issue.detectedLabels.length === 0);
+    if (unlabeledIssues.length > 0) {
+      log(`Labeling ${unlabeledIssues.length} unlabeled issues before export...`);
+      
+      // Prepare issues for batch labeling
+      const issuesToLabel = unlabeledIssues.map((issue, idx) => ({
+        index: idx,
+        issueNumber: issue.issueNumber,
+        title: issue.issueTitle || `Issue #${issue.issueNumber}`,
+        description: issue.issueBody?.substring(0, 300),
+        existingLabels: issue.issueLabels || [],
+      }));
+      
+      // Batch detect labels
+      const detectedLabelsMap = await batchDetectLabelsWithLLM(issuesToLabel);
+      
+      // Save detected labels to database
+      let labeledCount = 0;
+      for (let i = 0; i < unlabeledIssues.length; i++) {
+        const issue = unlabeledIssues[i];
+        const detectedLabels = detectedLabelsMap.get(i) || [];
+        
+        if (detectedLabels.length > 0) {
+          await prisma.gitHubIssue.update({
+            where: { issueNumber: issue.issueNumber },
+            data: { detectedLabels },
+          });
+          
+          // Update the issue object in memory so it's available for export
+          issue.detectedLabels = detectedLabels;
+          labeledCount++;
+        }
+      }
+      
+      log(`Labeled ${labeledCount} issues before export`);
+    } else {
+      log("All issues already have labels");
+    }
+
     // STEP 2: Load Discord messages from database
     let discordCache: import("../storage/cache/discordCache.js").DiscordCache | null = null;
     if (channelId) {
@@ -3740,30 +3782,29 @@ export async function exportIssuesToPMTool(
             const featureId = issueFeatures?.[0]?.id || "general";
             const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            // Use DB labels instead of fetching from Linear every time
-            // Only fetch from Linear if labels are missing in DB (first time or manual update)
+            // Use DB labels as source of truth instead of fetching from Linear every time
+            // But we still need to fetch from Linear to check title/priority/project
             let currentLabelNames = new Set<string>(group.linearLabels || []);
             let currentLinearIssue: Awaited<ReturnType<typeof getIssueMethod>> | null = null;
             
-            // Only fetch from Linear if we need title/project/priority check OR if labels are missing
-            const needsLinearFetch = updateAllTitles || group.linearLabels.length === 0;
-            if (needsLinearFetch) {
-              currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
-              if (!currentLinearIssue) {
-                logError(`  Linear issue ${group.linearIssueId} not found`);
-                errorCount++;
-                continue;
-              }
-              
-              // Update DB labels from Linear if they were missing
-              if (group.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
-                currentLabelNames = new Set(currentLinearIssue.labelNames);
-                // Save to DB
-                await prisma.group.update({
-                  where: { id: group.id },
-                  data: { linearLabels: Array.from(currentLabelNames) },
-                });
-              }
+            // Always fetch from Linear when updating (to check title/priority/project)
+            // The optimization is using DB labels instead of API labels for comparison
+            currentLinearIssue = await getIssueMethod.call(linearTool, group.linearIssueId);
+            if (!currentLinearIssue) {
+              logError(`  Linear issue ${group.linearIssueId} not found`);
+              errorCount++;
+              continue;
+            }
+            
+            // Update DB labels from Linear ONLY if they were missing in DB (first time sync)
+            // Otherwise, use DB labels as source of truth
+            if (group.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
+              currentLabelNames = new Set(currentLinearIssue.labelNames);
+              // Save to DB
+              await prisma.group.update({
+                where: { id: group.id },
+                data: { linearLabels: Array.from(currentLabelNames) },
+              });
             }
             
             // Build expected title with last comment info
@@ -3930,30 +3971,29 @@ export async function exportIssuesToPMTool(
             const featureId = issueFeatures?.[0]?.id || "general";
             const expectedProjectId = projectMappings.get(featureId) || projectMappings.get("general");
             
-            // Use DB labels instead of fetching from Linear every time
-            // Only fetch from Linear if labels are missing in DB (first time or manual update)
+            // Use DB labels as source of truth instead of fetching from Linear every time
+            // But we still need to fetch from Linear to check title/priority/project
             let currentLabelNames = new Set<string>(issue.linearLabels || []);
             let currentLinearIssue: Awaited<ReturnType<typeof getIssueMethod>> | null = null;
             
-            // Only fetch from Linear if we need title/project/priority check OR if labels are missing
-            const needsLinearFetch = updateAllTitles || issue.linearLabels.length === 0;
-            if (needsLinearFetch) {
-              currentLinearIssue = await getIssueMethod.call(linearTool, issue.linearIssueId);
-              if (!currentLinearIssue) {
-                logError(`  Linear issue ${issue.linearIssueId} not found`);
-                errorCount++;
-                continue;
-              }
-              
-              // Update DB labels from Linear if they were missing
-              if (issue.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
-                currentLabelNames = new Set(currentLinearIssue.labelNames);
-                // Save to DB
-                await prisma.gitHubIssue.update({
-                  where: { issueNumber: issue.issueNumber },
-                  data: { linearLabels: Array.from(currentLabelNames) },
-                });
-              }
+            // Always fetch from Linear when updating (to check title/priority/project)
+            // The optimization is using DB labels instead of API labels for comparison
+            currentLinearIssue = await getIssueMethod.call(linearTool, issue.linearIssueId);
+            if (!currentLinearIssue) {
+              logError(`  Linear issue ${issue.linearIssueId} not found`);
+              errorCount++;
+              continue;
+            }
+            
+            // Update DB labels from Linear ONLY if they were missing in DB (first time sync)
+            // Otherwise, use DB labels as source of truth
+            if (issue.linearLabels.length === 0 && currentLinearIssue.labelNames && Array.isArray(currentLinearIssue.labelNames)) {
+              currentLabelNames = new Set(currentLinearIssue.labelNames);
+              // Save to DB
+              await prisma.gitHubIssue.update({
+                where: { issueNumber: issue.issueNumber },
+                data: { linearLabels: Array.from(currentLabelNames) },
+              });
             }
             
             // Build expected title with last comment info
