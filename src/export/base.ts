@@ -4,6 +4,7 @@
  */
 
 import { PMToolIssue, PMToolConfig, ExportResult } from "./types.js";
+import { log, logError } from "../mcp/logger.js";
 
 /**
  * Linear-specific interface for methods not in base IPMTool
@@ -77,49 +78,66 @@ export abstract class BasePMTool implements IPMTool {
     for (const issue of issues) {
       try {
         // Check if issue already has a stored ID (from previous export)
-        // If it does, verify it exists before using it
+        // Prioritize stored ID to avoid duplicates when titles change
         let existing: { id: string; url: string } | null = null;
         
         if (issue.linear_issue_id) {
-          // Verify the stored ID exists in Linear
+          // First try to verify the stored ID exists in Linear
           if ('getIssue' in this && typeof this.getIssue === "function") {
-            const verifiedIssue = await this.getIssue(issue.linear_issue_id);
-            if (verifiedIssue) {
-              existing = {
-                id: verifiedIssue.id,
-                url: verifiedIssue.url,
-              };
+            try {
+              const verifiedIssue = await this.getIssue(issue.linear_issue_id);
+              if (verifiedIssue) {
+                existing = {
+                  id: verifiedIssue.id,
+                  url: verifiedIssue.url,
+                };
+              }
+            } catch (verifyError) {
+              // Verification failed (issue might be archived/deleted)
+              // Still try to use the stored ID - update might work even if getIssue fails
+              // This prevents creating duplicates when titles change (e.g., "X days ago - Title")
+              log(`Warning: Could not verify stored Linear issue ID ${issue.linear_issue_id}, but will try to update it anyway`);
             }
+          }
+          
+          // If verification succeeded or we have a stored ID, use it directly
+          // This ensures we update existing issues even when titles change
+          if (!existing && issue.linear_issue_id) {
+            // Try to use stored ID even if verification failed
+            // The update might still work (e.g., for archived issues)
+            existing = {
+              id: issue.linear_issue_id,
+              url: issue.linear_issue_url || `https://linear.app/issue/${issue.linear_issue_identifier || issue.linear_issue_id}`,
+            };
           }
         }
         
-        // If no stored ID or verification failed, try finding by source ID
+        // If no stored ID available, try finding by source ID as fallback
         // Only search if source_id is provided (duplicate detection)
+        // DO NOT use title as fallback - titles change (e.g., "X days ago - Title" format) and would create duplicates
         if (!existing && issue.source_id) {
-          // Check if findIssueBySourceId accepts optional title parameter (Linear implementation)
-          // Use bind to preserve 'this' context
-          const findMethod = this.findIssueBySourceId.bind(this);
-          // Check if the method signature accepts a second parameter (title)
-          // We can't check function.length reliably due to TypeScript, so try with title first
-          try {
-            // Try calling with title parameter (Linear implementation)
-            existing = await (findMethod as any)(issue.source_id, issue.title);
-          } catch (error) {
-            // If that fails or method doesn't accept title, try without
-            existing = await this.findIssueBySourceId(issue.source_id);
-          }
+          existing = await this.findIssueBySourceId(issue.source_id);
         }
         
         if (existing) {
           // Update existing issue
-          await this.updateIssue(existing.id, issue);
-          result.updated_issues++;
-          if (existing.url) {
-            result.issue_urls?.push(existing.url);
+          try {
+            await this.updateIssue(existing.id, issue);
+            result.updated_issues++;
+            if (existing.url) {
+              result.issue_urls?.push(existing.url);
+            }
+            // Ensure the issue object has the ID stored
+            issue.linear_issue_id = existing.id;
+          } catch (updateError) {
+            // Update failed - issue might have been deleted
+            // Fall back to creating a new issue
+            log(`Warning: Failed to update existing Linear issue ${existing.id}, creating new issue instead: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+            existing = null; // Reset to trigger creation
           }
-          // Ensure the issue object has the ID stored
-          issue.linear_issue_id = existing.id;
-        } else {
+        }
+        
+        if (!existing) {
           // Create new issue
           const created = await this.createIssue(issue);
           result.created_issues++;

@@ -506,6 +506,8 @@ export class LinearIntegration extends BasePMTool {
     // This method is primarily used when no stored ID exists
     
     // First, try searching by source_id in description (most reliable)
+    // This is the primary way to find existing issues - never rely on title
+    // because title can change (e.g., when we add "X days ago - Title" format)
     try {
       const foundById = await this.searchIssueBySourceId(sourceId);
       if (foundById) {
@@ -515,23 +517,9 @@ export class LinearIntegration extends BasePMTool {
       logError(`Failed to search Linear issue by source_id "${sourceId}":`, error);
     }
     
-    // As a fallback, try searching by title if provided
-    if (title) {
-      try {
-        // Ensure this context is preserved
-        if (this && typeof this.searchIssueByTitle === 'function') {
-          const found = await this.searchIssueByTitle(title);
-          if (found) {
-            return found;
-          }
-        } else {
-          logError(`searchIssueByTitle method not available on LinearIntegration instance`);
-        }
-      } catch (error) {
-        // Log but don't fail - this is a fallback
-        logError(`Failed to search Linear issue by title "${title}":`, error);
-      }
-    }
+    // DO NOT use title as fallback - titles change (e.g., "X days ago - Title" format)
+    // If source_id search fails, the issue doesn't exist yet
+    // Title search would create duplicates when titles are updated
     
     return null;
   }

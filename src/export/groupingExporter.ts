@@ -179,6 +179,127 @@ Return ONLY the title text, nothing else.`
  * Returns "urgent" | "high" | "medium" | "low"
  * Priority order: security > bugs > cross-cutting > regular
  */
+/**
+ * Extract last comment date text from issueComments JSON
+ * Returns formatted text like "2 days ago" or null if no comments
+ */
+function extractLastCommentText(issueComments: unknown): string | null {
+  if (!issueComments) {
+    return null;
+  }
+
+  const comments = issueComments as Array<{
+    created_at?: string;
+    updated_at?: string;
+    body?: string;
+  }>;
+
+  if (!Array.isArray(comments) || comments.length === 0) {
+    return null;
+  }
+
+  // Find the most recent comment by created_at
+  const commentsWithDates = comments
+    .map(c => {
+      const dateStr = c.created_at || c.updated_at;
+      if (!dateStr) return null;
+      return new Date(dateStr);
+    })
+    .filter((c): c is Date => c !== null);
+
+  if (commentsWithDates.length === 0) {
+    return null;
+  }
+
+  // Sort by date descending (most recent first)
+  commentsWithDates.sort((a, b) => b.getTime() - a.getTime());
+  const lastCommentDate = commentsWithDates[0];
+
+  // Calculate days ago
+  const now = new Date();
+  const diffMs = now.getTime() - lastCommentDate.getTime();
+  const daysAgo = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  // Format display text (only days and above, since we update daily)
+  if (daysAgo === 0) {
+    return "today";
+  } else if (daysAgo === 1) {
+    return "yesterday";
+  } else if (daysAgo < 7) {
+    return `${daysAgo} days ago`;
+  } else if (daysAgo < 30) {
+    const weeksAgo = Math.floor(daysAgo / 7);
+    return `${weeksAgo} week${weeksAgo === 1 ? "" : "s"} ago`;
+  } else if (daysAgo < 365) {
+    const monthsAgo = Math.floor(daysAgo / 30);
+    return `${monthsAgo} month${monthsAgo === 1 ? "" : "s"} ago`;
+  } else {
+    const yearsAgo = Math.floor(daysAgo / 365);
+    return `${yearsAgo} year${yearsAgo === 1 ? "" : "s"} ago`;
+  }
+}
+
+/**
+ * Extract last comment date text from multiple issues (for groups)
+ * Returns the most recent comment date across all issues
+ */
+function extractLastCommentTextFromIssues(issues: Array<{ issueComments?: unknown }>): string | null {
+  const allCommentDates: Date[] = [];
+
+  for (const issue of issues) {
+    if (!issue.issueComments) continue;
+    const comments = issue.issueComments as Array<{
+      created_at?: string;
+      updated_at?: string;
+    }>;
+
+    if (!Array.isArray(comments) || comments.length === 0) {
+      continue;
+    }
+
+    for (const comment of comments) {
+      const dateStr = comment.created_at || comment.updated_at;
+      if (dateStr) {
+        const date = new Date(dateStr);
+        if (!isNaN(date.getTime())) {
+          allCommentDates.push(date);
+        }
+      }
+    }
+  }
+
+  if (allCommentDates.length === 0) {
+    return null;
+  }
+
+  // Find the most recent date across all issues
+  allCommentDates.sort((a, b) => b.getTime() - a.getTime());
+  const lastCommentDate = allCommentDates[0];
+
+  // Calculate days ago
+  const now = new Date();
+  const diffMs = now.getTime() - lastCommentDate.getTime();
+  const daysAgo = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  // Format display text (only days and above, since we update daily)
+  if (daysAgo === 0) {
+    return "today";
+  } else if (daysAgo === 1) {
+    return "yesterday";
+  } else if (daysAgo < 7) {
+    return `${daysAgo} days ago`;
+  } else if (daysAgo < 30) {
+    const weeksAgo = Math.floor(daysAgo / 7);
+    return `${weeksAgo} week${weeksAgo === 1 ? "" : "s"} ago`;
+  } else if (daysAgo < 365) {
+    const monthsAgo = Math.floor(daysAgo / 30);
+    return `${monthsAgo} month${monthsAgo === 1 ? "" : "s"} ago`;
+  } else {
+    const yearsAgo = Math.floor(daysAgo / 365);
+    return `${yearsAgo} year${yearsAgo === 1 ? "" : "s"} ago`;
+  }
+}
+
 function calculatePriority(options: {
   labels?: string[];
   title?: string;
@@ -2837,6 +2958,7 @@ export async function exportIssuesToPMTool(
     dry_run?: boolean;
     update_projects?: boolean; // Update existing Linear issues with correct project (feature) assignments (deprecated, use update)
     update?: boolean; // Update existing Linear issues with all differences (projects, labels, priority, title, description)
+    update_all_titles?: boolean; // One-time migration: Update ALL existing Linear issues with last comment info in titles (format: "X days ago - Title")
   }
 ): Promise<ExportWorkflowResult> {
   const includeClosed = options?.include_closed ?? false;
@@ -2845,6 +2967,7 @@ export async function exportIssuesToPMTool(
   // Support both update_projects (legacy) and update (new) - update takes precedence
   const update = options?.update ?? options?.update_projects ?? false;
   const updateProjects = update; // Keep for backward compatibility in the code
+  const updateAllTitles = options?.update_all_titles ?? false;
   const result: ExportWorkflowResult = {
     success: false,
     features_extracted: 0,
@@ -3188,8 +3311,13 @@ export async function exportIssuesToPMTool(
           message_count: m.messageCount || 0,
         }));
 
+        // Extract last comment date from all issues in the group
+        const lastCommentText = extractLastCommentTextFromIssues(groupIssueList);
+        const groupTitle = group.suggestedTitle || `Issue Group ${group.id}`;
+        const titleWithComment = lastCommentText ? `${lastCommentText} - ${groupTitle}` : groupTitle;
+
         pmIssues.push({
-          title: group.suggestedTitle || `Issue Group ${group.id}`,
+          title: titleWithComment,
           description: descriptionParts.join("\n"),
           feature_id: topFeature.id,
           feature_name: topFeature.name,
@@ -3305,8 +3433,13 @@ export async function exportIssuesToPMTool(
           message_count: m.messageCount || 0,
         }));
 
+        // Extract last comment date from database (issueComments JSON)
+        const lastCommentText = extractLastCommentText(issue.issueComments);
+        const title = issue.issueTitle || `GitHub Issue #${issue.issueNumber}`;
+        const titleWithComment = lastCommentText ? `${lastCommentText} - ${title}` : title;
+
         pmIssues.push({
-          title: issue.issueTitle || `GitHub Issue #${issue.issueNumber}`,
+          title: titleWithComment,
           description: descriptionParts.join("\n"),
           feature_id: topFeature.id,
           feature_name: topFeature.name,
@@ -3400,13 +3533,19 @@ export async function exportIssuesToPMTool(
       
       // =============================================================
       // STEP 4.6: Update existing Linear issues with differences (if update flag set)
+      // OR update all titles (if update_all_titles flag set)
       // =============================================================
       const updateIssueMethod = linearTool.updateIssue;
       const getIssueMethod = linearTool.getIssue;
-      if (update && updateIssueMethod && getIssueMethod) {
-        log("Updating existing Linear issues with all differences from database...");
+      if ((update || updateAllTitles) && updateIssueMethod && getIssueMethod) {
+        if (updateAllTitles) {
+          log("Updating ALL existing Linear issues with last comment info in titles (one-time migration)...");
+        } else {
+          log("Updating existing Linear issues with all differences from database...");
+        }
         
         // Get all exported issues (groups and ungrouped) that have a linearIssueId
+        // Only include open issues (unless includeClosed is true) to avoid updating titles for closed issues
         const exportedGroups = await prisma.group.findMany({
           where: { linearIssueId: { not: null } },
         });
@@ -3415,6 +3554,7 @@ export async function exportIssuesToPMTool(
           where: { 
             linearIssueId: { not: null },
             groupId: null, // Only ungrouped issues (grouped ones are handled via groups)
+            ...(includeClosed ? {} : { issueState: "open" }), // Only open issues unless includeClosed is true
           },
         });
         
@@ -3469,28 +3609,52 @@ export async function exportIssuesToPMTool(
               continue;
             }
             
+            // Build expected title with last comment info
+            const lastCommentText = extractLastCommentTextFromIssues(groupIssues);
+            const expectedTitleBase = group.suggestedTitle || `Issue Group ${group.id}`;
+            const expectedTitle = lastCommentText ? `${lastCommentText} - ${expectedTitleBase}` : expectedTitleBase;
+            
             // Build update object with only changed fields
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
-              updates.project_id = expectedProjectId;
+            // Check if title needs updating
+            const currentTitle = currentLinearIssue.title || "";
+            if (currentTitle !== expectedTitle) {
+              updates.title = expectedTitle;
               hasChanges = true;
             }
             
-            const expectedLabelNames = Array.from(allLabels).sort();
-            const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
-            if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
-              updates.labels = expectedLabelNames;
-              hasChanges = true;
-            }
-            
-            // Map priority to Linear number format for comparison
-            const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-            const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-            if (currentLinearIssue.priority !== expectedPriorityNumber) {
-              updates.priority = expectedPriority;
-              hasChanges = true;
+            // If update_all_titles, only update title (skip other fields)
+            if (updateAllTitles) {
+              if (hasChanges) {
+                // Only update title
+              } else {
+                // Title is already correct, skip
+                skippedCount++;
+                continue;
+              }
+            } else {
+              // Normal update: check all fields
+              if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+                updates.project_id = expectedProjectId;
+                hasChanges = true;
+              }
+              
+              const expectedLabelNames = Array.from(allLabels).sort();
+              const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
+              if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
+                updates.labels = expectedLabelNames;
+                hasChanges = true;
+              }
+              
+              // Map priority to Linear number format for comparison
+              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+              if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                updates.priority = expectedPriority;
+                hasChanges = true;
+              }
             }
             
             if (hasChanges) {
@@ -3592,28 +3756,52 @@ export async function exportIssuesToPMTool(
               continue;
             }
             
+            // Build expected title with last comment info
+            const lastCommentText = extractLastCommentText(issue.issueComments);
+            const expectedTitleBase = issue.issueTitle || `GitHub Issue #${issue.issueNumber}`;
+            const expectedTitle = lastCommentText ? `${lastCommentText} - ${expectedTitleBase}` : expectedTitleBase;
+            
             // Build update object with only changed fields
             const updates: Partial<PMToolIssue> = {};
             let hasChanges = false;
             
-            if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
-              updates.project_id = expectedProjectId;
+            // Check if title needs updating
+            const currentTitle = currentLinearIssue.title || "";
+            if (currentTitle !== expectedTitle) {
+              updates.title = expectedTitle;
               hasChanges = true;
             }
             
-            const expectedLabelNames = labels.sort();
-            const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
-            if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
-              updates.labels = expectedLabelNames;
-              hasChanges = true;
-            }
-            
-            // Map priority to Linear number format for comparison
-            const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
-            const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
-            if (currentLinearIssue.priority !== expectedPriorityNumber) {
-              updates.priority = expectedPriority;
-              hasChanges = true;
+            // If update_all_titles, only update title (skip other fields)
+            if (updateAllTitles) {
+              if (hasChanges) {
+                // Only update title
+              } else {
+                // Title is already correct, skip
+                skippedCount++;
+                continue;
+              }
+            } else {
+              // Normal update: check all fields
+              if (expectedProjectId && currentLinearIssue.projectId !== expectedProjectId) {
+                updates.project_id = expectedProjectId;
+                hasChanges = true;
+              }
+              
+              const expectedLabelNames = labels.sort();
+              const currentLabelNames = (currentLinearIssue.labelNames || []).sort();
+              if (JSON.stringify(expectedLabelNames) !== JSON.stringify(currentLabelNames)) {
+                updates.labels = expectedLabelNames;
+                hasChanges = true;
+              }
+              
+              // Map priority to Linear number format for comparison
+              const linearPriorityMap: Record<string, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
+              const expectedPriorityNumber = linearPriorityMap[expectedPriority] || 0;
+              if (currentLinearIssue.priority !== expectedPriorityNumber) {
+                updates.priority = expectedPriority;
+                hasChanges = true;
+              }
             }
             
             if (hasChanges) {

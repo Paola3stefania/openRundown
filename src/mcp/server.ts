@@ -402,7 +402,12 @@ const tools: Tool[] = [
         },
         update: {
           type: "boolean",
-          description: "If true, updates existing Linear issues with all differences from database (projects, labels, priority). Compares database state with Linear and updates any differences.",
+          description: "If true, updates existing Linear issues with all differences from database (projects, labels, priority, titles). Compares database state with Linear and updates any differences.",
+          default: false,
+        },
+        update_all_titles: {
+          type: "boolean",
+          description: "One-time migration: If true, updates ALL existing Linear issues with last comment info in titles. Only updates titles, skips other fields. Format: 'X days ago - Title' (e.g., '1 week ago - Title').",
           default: false,
         },
       },
@@ -4393,6 +4398,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const exportResult = await exportIssuesToPMTool(pmToolConfig, {
                 include_closed: false,
                 channelId: actualChannelId,
+                update: true, // Update existing Linear issues (including titles with last comment info)
               });
 
               issuesExported = exportResult.issues_exported?.created || 0;
@@ -4433,12 +4439,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             
             results.steps.push({
               step: "sync_linear_status",
-          status: "success",
-          result: {
+              status: "success",
+              result: {
                 tickets_checked: syncResult.totalLinearTickets || 0,
                 tickets_marked_done: ticketsMarkedDone,
-          },
-        });
+                tickets_marked_review: syncResult.markedReview || 0,
+              },
+            });
           } catch (err) {
             syncError = err instanceof Error ? err.message : String(err);
             results.steps.push({
@@ -4479,6 +4486,8 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               result: {
                 total_issues: prSyncResult.totalIssues || 0,
                 updated: prSyncResult.updated || 0,
+                set_to_in_progress: prSyncResult.setToInProgress || 0,
+                set_to_review: prSyncResult.setToReview || 0,
                 unchanged: prSyncResult.unchanged || 0,
                 skipped: prSyncResult.skipped || 0,
                 errors: prSyncResult.errors || 0,
@@ -4562,6 +4571,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         dry_run = false,
         update_projects = false,
         update = false,
+        update_all_titles = false,
       } = args as {
         use_issue_centric?: boolean;
         channel_id?: string;
@@ -4569,6 +4579,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         dry_run?: boolean;
         update_projects?: boolean;
         update?: boolean;
+        update_all_titles?: boolean;
       };
 
       try {
@@ -4641,6 +4652,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           dry_run: dry_run,
           update: updateFlag,
           update_projects: update_projects, // Keep for backward compatibility
+          update_all_titles: update_all_titles,
         });
 
         if (!result) {
@@ -5040,9 +5052,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("PM_TOOL_TEAM_ID is required or provide team_name");
         }
 
-        console.error(`[RemoveDuplicates] Fetching all Linear issues for team ${teamId} (including archived)...`);
+        console.error(`[RemoveDuplicates] Fetching active Linear issues for team ${teamId} (excluding archived)...`);
 
-        // Fetch ALL issues from the team including archived ones
+        // Fetch active issues from the team (exclude archived to reduce fetch time)
         // Use GraphQL directly to get all issues with pagination
         const allIssues: Array<{
           id: string;
@@ -5061,7 +5073,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const query = `
             query GetTeamIssues($teamId: String!, $first: Int!, $after: String) {
               team(id: $teamId) {
-                issues(first: $first, after: $after, includeArchived: true) {
+                issues(first: $first, after: $after, includeArchived: false) {
                   nodes {
                     id
                     identifier
@@ -5379,12 +5391,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const deleted: Array<{ id: string; identifier: string; url: string }> = [];
         const errors: Array<{ id: string; identifier: string; error: string }> = [];
 
+        const DELAY_BETWEEN_REQUESTS = 500; // 500ms delay to avoid rate limiting
+        let processed = 0;
+        const totalToProcess = duplicates.reduce((sum, d) => sum + d.remove.length, 0);
+
         for (const dup of duplicates) {
           for (const issueToRemove of dup.remove) {
+            processed++;
             try {
-              // Linear uses soft delete (trash) - issues can be recovered
-              // Use issueArchive for safer deletion, or issueDelete for permanent removal
-              // We'll use issueArchive which moves to trash
+              // First archive (soft delete) - required before permanent deletion
               const archiveQuery = `
                 mutation ArchiveIssue($id: String!) {
                   issueArchive(id: $id) {
@@ -5393,7 +5408,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
               `;
 
-              const response = await fetch("https://api.linear.app/graphql", {
+              const archiveResponse = await fetch("https://api.linear.app/graphql", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -5405,23 +5420,77 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }),
               });
 
-              const result = await response.json() as {
+              const archiveResult = await archiveResponse.json() as {
                 data?: { issueArchive?: { success: boolean } };
                 errors?: Array<{ message: string }>;
               };
 
-              if (result.data?.issueArchive?.success) {
+              // Log full archive API response including HTTP status
+              console.error(`[RemoveDuplicates] [${processed}/${totalToProcess}] Archive API request for ${issueToRemove.identifier} (ID: ${issueToRemove.id}):`);
+              console.error(`  HTTP Status: ${archiveResponse.status} ${archiveResponse.statusText}`);
+              console.error(`  Response: ${JSON.stringify(archiveResult, null, 2)}`);
+
+              if (!archiveResult.data?.issueArchive?.success) {
+                const errorMsg = archiveResult.errors?.map(e => e.message).join(", ") || "Unknown error";
+                const fullError = `[${processed}/${totalToProcess}] Failed to archive ${issueToRemove.identifier}: ${errorMsg}`;
+                errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: fullError });
+                console.error(`[RemoveDuplicates] ${fullError}`);
+                continue;
+              }
+
+              // Wait longer between archive and delete (1 second to ensure archiving completes)
+              await new Promise(resolve => setTimeout(resolve, 1000));
+
+              // Now permanently delete
+              const deleteQuery = `
+                mutation DeleteIssue($id: String!) {
+                  issueDelete(id: $id) {
+                    success
+                  }
+                }
+              `;
+
+              const deleteResponse = await fetch("https://api.linear.app/graphql", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": process.env.PM_TOOL_API_KEY!,
+                },
+                body: JSON.stringify({
+                  query: deleteQuery,
+                  variables: { id: issueToRemove.id },
+                }),
+              });
+
+              const deleteResult = await deleteResponse.json() as {
+                data?: { issueDelete?: { success: boolean } };
+                errors?: Array<{ message: string }>;
+              };
+
+              // Log full delete API response including HTTP status
+              console.error(`[RemoveDuplicates] [${processed}/${totalToProcess}] Delete API request for ${issueToRemove.identifier} (ID: ${issueToRemove.id}):`);
+              console.error(`  HTTP Status: ${deleteResponse.status} ${deleteResponse.statusText}`);
+              console.error(`  Response: ${JSON.stringify(deleteResult, null, 2)}`);
+
+              if (deleteResult.data?.issueDelete?.success) {
                 deleted.push(issueToRemove);
-                console.error(`[RemoveDuplicates] Deleted ${issueToRemove.identifier}: ${issueToRemove.url}`);
+                console.error(`[RemoveDuplicates] [${processed}/${totalToProcess}] Permanently deleted ${issueToRemove.identifier}: ${issueToRemove.url}`);
               } else {
-                const errorMsg = result.errors?.map(e => e.message).join(", ") || "Unknown error";
-                errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: errorMsg });
-                console.error(`[RemoveDuplicates] Failed to delete ${issueToRemove.identifier}: ${errorMsg}`);
+                const errorMsg = deleteResult.errors?.map(e => e.message).join(", ") || JSON.stringify(deleteResult);
+                const fullError = `[${processed}/${totalToProcess}] Failed to permanently delete ${issueToRemove.identifier} (was archived): ${errorMsg}`;
+                errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: fullError });
+                console.error(`[RemoveDuplicates] ${fullError}`);
+              }
+
+              // Delay between issues to respect rate limits
+              if (processed < totalToProcess) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
               }
             } catch (error) {
               const errorMsg = error instanceof Error ? error.message : String(error);
-              errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: errorMsg });
-              console.error(`[RemoveDuplicates] Error deleting ${issueToRemove.identifier}:`, error);
+              const fullError = `[${processed}/${totalToProcess}] Error deleting ${issueToRemove.identifier}: ${errorMsg}`;
+              errors.push({ id: issueToRemove.id, identifier: issueToRemove.identifier, error: fullError });
+              console.error(`[RemoveDuplicates] ${fullError}`, error);
             }
           }
         }
