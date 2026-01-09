@@ -420,6 +420,7 @@ model Feature {
 
   embedding FeatureEmbedding?
   codeMappings FeatureCodeMapping[]
+  ownership FeatureOwnership[]
 
   @@index([name])
   @@index([category])
@@ -556,6 +557,48 @@ model FeatureCodeMapping {
   @@index([similarity(sort: Desc)])
   @@index([matchType])
   @@map("feature_code_mappings")
+}
+
+// Code ownership analysis based on commit history
+model CodeOwnership {
+  id            String   @id @default(uuid())
+  filePath      String   @map("file_path")
+  engineer      String   // GitHub username
+  linesAdded    Int      @default(0) @map("lines_added")
+  linesDeleted  Int      @default(0) @map("lines_deleted")
+  commitsCount  Int      @default(0) @map("commits_count")
+  ownershipPercent Decimal @db.Decimal(5, 2) @map("ownership_percent") // 0.00-100.00
+  lastCommitSha String?  @map("last_commit_sha")
+  lastCommitDate DateTime? @map("last_commit_date")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  @@unique([filePath, engineer])
+  @@index([filePath])
+  @@index([engineer])
+  @@index([ownershipPercent(sort: Desc)])
+  @@map("code_ownership")
+}
+
+// Feature-level ownership (aggregated from file ownership)
+model FeatureOwnership {
+  id            String   @id @default(uuid())
+  featureId     String   @map("feature_id")
+  engineer      String   // GitHub username
+  ownershipPercent Decimal @db.Decimal(5, 2) @map("ownership_percent") // 0.00-100.00
+  filesCount    Int      @default(0) @map("files_count")
+  totalLines    Int      @default(0) @map("total_lines")
+  lastUpdated   DateTime @default(now()) @map("last_updated")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  
+  feature      Feature   @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  
+  @@unique([featureId, engineer])
+  @@index([featureId])
+  @@index([engineer])
+  @@index([ownershipPercent(sort: Desc)])
+  @@map("feature_ownership")
 }
 
 model UngroupedIssue {

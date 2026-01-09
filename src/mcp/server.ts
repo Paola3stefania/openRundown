@@ -1022,6 +1022,46 @@ const tools: Tool[] = [
       required: ["action"],
     },
   },
+  {
+    name: "analyze_code_ownership",
+    description: "Analyze codebase commit history to determine code ownership by engineers. Calculates what percentage of code belongs to each engineer, then maps to features for recommended assignees. This enables automatic assignment suggestions in Linear issues based on who has worked on related code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        force: {
+          type: "boolean",
+          description: "If true, re-analyze even if recent analysis exists. If false (default), skip if analysis is less than 24 hours old.",
+          default: false,
+        },
+        since: {
+          type: "string",
+          description: "ISO date string to analyze commits since (e.g., '2024-01-01T00:00:00Z'). If not provided, analyzes all commits.",
+        },
+        calculate_feature_ownership: {
+          type: "boolean",
+          description: "If true (default), also calculate feature-level ownership after file analysis. This maps file ownership to features for better assignee recommendations.",
+          default: true,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "view_feature_ownership",
+    description: "View feature ownership table showing all features and the percentage of code owned by each engineer. Displays as a formatted table with engineer names, ownership percentages, file counts, and total lines.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        format: {
+          type: "string",
+          enum: ["table", "json"],
+          description: "Output format: 'table' (markdown table, default) or 'json' (structured data)",
+          default: "table",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -10861,6 +10901,82 @@ Example output:
       } catch (error) {
         logError("Documentation cache management failed:", error);
         throw new Error(`Documentation cache management failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "analyze_code_ownership": {
+      const { force = false, since, calculate_feature_ownership = true } = args as {
+        force?: boolean;
+        since?: string;
+        calculate_feature_ownership?: boolean;
+      };
+
+      try {
+        const { analyzeCodeOwnership, calculateFeatureOwnership } = await import("../analysis/codeOwnership.js");
+        
+        console.error("[CodeOwnership] Starting code ownership analysis...");
+        const result = await analyzeCodeOwnership(force, since);
+        
+        if (calculate_feature_ownership) {
+          console.error("[CodeOwnership] Calculating feature-level ownership...");
+          await calculateFeatureOwnership();
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: "Code ownership analysis complete",
+                files_analyzed: result.filesAnalyzed,
+                engineers_found: result.engineersFound,
+                feature_ownership_calculated: calculate_feature_ownership,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Code ownership analysis failed:", error);
+        throw new Error(`Code ownership analysis failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "view_feature_ownership": {
+      const { format = "table" } = args as {
+        format?: "table" | "json";
+      };
+
+      try {
+        const { getAllFeatureOwnership, formatFeatureOwnershipTable } = await import("../analysis/codeOwnership.js");
+        
+        if (format === "json") {
+          const data = await getAllFeatureOwnership();
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  features: data,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          const table = await formatFeatureOwnershipTable();
+          return {
+            content: [
+              {
+                type: "text",
+                text: table,
+              },
+            ],
+          };
+        }
+      } catch (error) {
+        logError("Failed to view feature ownership:", error);
+        throw new Error(`Failed to view feature ownership: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

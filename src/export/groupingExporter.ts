@@ -3411,6 +3411,27 @@ export async function exportIssuesToPMTool(
           ? issueFeatures[0] 
           : { id: "general", name: "General" };
 
+        // Add recommended assignees based on code ownership
+        try {
+          const { getRecommendedAssignees } = await import("../analysis/codeOwnership.js");
+          if (topFeature.id !== "general") {
+            const recommendedAssignees = await getRecommendedAssignees(topFeature.id, 5);
+            if (recommendedAssignees.length > 0) {
+              descriptionParts.push("## Owner/Recommended Assignee");
+              descriptionParts.push("");
+              const assigneeList = recommendedAssignees.map((a, index) => {
+                const percent = a.ownershipPercent.toFixed(1);
+                return `${index + 1}. @${a.engineer} (${percent}% - ${a.filesCount} file${a.filesCount !== 1 ? 's' : ''})`;
+              }).join("\n");
+              descriptionParts.push(assigneeList);
+              descriptionParts.push("");
+            }
+          }
+        } catch (error) {
+          // Silently fail if ownership analysis not available
+          log(`[Export] Could not fetch recommended assignees: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
         // Build discord_threads array with full details
         const discordThreadsMetadata = groupThreadMatches.slice(0, 10).map(m => ({
           thread_id: m.threadId,
@@ -3591,6 +3612,27 @@ export async function exportIssuesToPMTool(
         const topFeature = issueFeatures && issueFeatures.length > 0 
           ? issueFeatures[0] 
           : { id: "general", name: "General" };
+
+        // Add recommended assignees based on code ownership
+        try {
+          const { getRecommendedAssignees } = await import("../analysis/codeOwnership.js");
+          if (topFeature.id !== "general") {
+            const recommendedAssignees = await getRecommendedAssignees(topFeature.id, 5);
+            if (recommendedAssignees.length > 0) {
+              descriptionParts.push("## Owner/Recommended Assignee");
+              descriptionParts.push("");
+              const assigneeList = recommendedAssignees.map((a, index) => {
+                const percent = a.ownershipPercent.toFixed(1);
+                return `${index + 1}. @${a.engineer} (${percent}% - ${a.filesCount} file${a.filesCount !== 1 ? 's' : ''})`;
+              }).join("\n");
+              descriptionParts.push(assigneeList);
+              descriptionParts.push("");
+            }
+          }
+        } catch (error) {
+          // Silently fail if ownership analysis not available
+          log(`[Export] Could not fetch recommended assignees: ${error instanceof Error ? error.message : String(error)}`);
+        }
 
         // Build discord_threads array with full details
         const discordThreadsMetadata = threadMatches.slice(0, 10).map(m => ({
