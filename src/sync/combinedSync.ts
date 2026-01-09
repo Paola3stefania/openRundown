@@ -9,6 +9,7 @@
 
 import { syncPRBasedStatus, type SyncSummary as PRSyncSummary } from "./prBasedSync.js";
 import { syncLinearStatus, type SyncSummary as LinearSyncSummary } from "./linearStatusSync.js";
+import { syncEngineerComments, type CommentSyncResult } from "./commentSync.js";
 import { log } from "../mcp/logger.js";
 
 export interface CombinedSyncOptions {
@@ -23,11 +24,13 @@ export interface CombinedSyncResult {
   success: boolean;
   dryRun: boolean;
   prSync: PRSyncSummary;
+  commentSync: CommentSyncResult;
   linearSync: LinearSyncSummary;
   summary: {
     totalIssuesChecked: number;
     totalLinearTicketsChecked: number;
     issuesSetToInProgress: number;
+    issuesAssignedFromComments: number;
     ticketsMarkedAsDone: number;
     ticketsMarkedAsReview: number;
     totalUpdated: number;
@@ -45,7 +48,7 @@ export async function runCombinedSync(
   log("[Combined Sync] Starting combined sync workflow...");
   log("[Combined Sync] Step 1: Running PR-based sync (In Progress + Assignment)");
   
-  // Step 1: PR-based sync - sets issues to In Progress and assigns users
+  // Step 1: PR-based sync - sets issues to In Progress and assigns users based on PRs
   const prSyncResult = await syncPRBasedStatus({
     dryRun,
     userMappings,
@@ -55,7 +58,18 @@ export async function runCombinedSync(
 
   log(`[Combined Sync] PR sync complete: ${prSyncResult.updated} updated (${prSyncResult.setToInProgress} In Progress, ${prSyncResult.setToReview} Review), ${prSyncResult.unchanged} unchanged, ${prSyncResult.skipped} skipped`);
 
-  log("[Combined Sync] Step 2: Running Linear status sync (Done status)");
+  log("[Combined Sync] Step 2: Running engineer comment sync (In Progress + Assignment)");
+  
+  // Step 2: Comment sync - sets issues to In Progress and assigns users based on engineer comments
+  const commentSyncResult = await syncEngineerComments({
+    dryRun,
+    userMappings,
+    organizationEngineers,
+  });
+
+  log(`[Combined Sync] Comment sync complete: ${commentSyncResult.updated} updated, ${commentSyncResult.unchanged} unchanged, ${commentSyncResult.skipped} skipped`);
+
+  log("[Combined Sync] Step 3: Running Linear status sync (Done status)");
   
   // Step 2: Linear status sync - marks issues as Done when closed/merged
   const linearSyncResult = await syncLinearStatus({
@@ -67,22 +81,25 @@ export async function runCombinedSync(
 
   // Combine Review status from both PR sync (merged PRs) and Linear sync (comment analysis)
   const totalReview = prSyncResult.setToReview + (linearSyncResult.markedReview || 0);
+  const totalInProgress = prSyncResult.setToInProgress + commentSyncResult.updated;
 
   const summary = {
     totalIssuesChecked: prSyncResult.totalIssues,
     totalLinearTicketsChecked: linearSyncResult.totalLinearTickets,
-    issuesSetToInProgress: prSyncResult.setToInProgress,
+    issuesSetToInProgress: totalInProgress,
+    issuesAssignedFromComments: commentSyncResult.updated,
     ticketsMarkedAsDone: linearSyncResult.markedDone,
     ticketsMarkedAsReview: totalReview,
-    totalUpdated: prSyncResult.updated + linearSyncResult.markedDone + (linearSyncResult.markedReview || 0),
+    totalUpdated: prSyncResult.updated + commentSyncResult.updated + linearSyncResult.markedDone + (linearSyncResult.markedReview || 0),
   };
 
-  log(`[Combined Sync] Workflow complete: ${summary.totalUpdated} total updates (${summary.issuesSetToInProgress} In Progress, ${summary.ticketsMarkedAsDone} Done, ${summary.ticketsMarkedAsReview} Review)`);
+  log(`[Combined Sync] Workflow complete: ${summary.totalUpdated} total updates (${summary.issuesSetToInProgress} In Progress [${commentSyncResult.updated} from comments], ${summary.ticketsMarkedAsDone} Done, ${summary.ticketsMarkedAsReview} Review)`);
 
   return {
     success: true,
     dryRun,
     prSync: prSyncResult,
+    commentSync: commentSyncResult,
     linearSync: linearSyncResult,
     summary,
   };

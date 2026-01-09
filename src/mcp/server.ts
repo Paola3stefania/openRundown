@@ -799,6 +799,38 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "sync_engineer_comments",
+    description: "Sync Linear issues based on engineer comments. When a Better Auth engineer comments on a GitHub issue, assign that engineer and set the Linear issue to 'In Progress'. Uses members.csv for engineer list and mappings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, show what would be updated without actually changing Linear (default: false)",
+          default: false,
+        },
+        user_mappings: {
+          type: "array",
+          description: "Array of user mappings: [{githubUsername: string, linearUserId: string}]. Maps organization engineer GitHub usernames to Linear user IDs.",
+          items: {
+            type: "object",
+            properties: {
+              githubUsername: { type: "string" },
+              linearUserId: { type: "string" },
+            },
+            required: ["githubUsername", "linearUserId"],
+          },
+        },
+        organization_engineers: {
+          type: "array",
+          description: "Array of organization engineer GitHub usernames. Comments from these users will trigger assignment.",
+          items: { type: "string" },
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "audit_and_fix_incorrectly_assigned",
     description: "Audit and fix Linear issues that are incorrectly in Review/In Progress status without valid PR links. Uses stricter matching logic to verify PR links, then reverts incorrectly assigned issues to Todo/Backlog state and clears assignees. This fixes false positives from previous syncs.",
     inputSchema: {
@@ -9725,6 +9757,45 @@ Example output:
       } catch (error) {
         logError("PR-based sync failed:", error);
         throw new Error(`PR-based sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "sync_engineer_comments": {
+      const { dry_run = false, user_mappings, organization_engineers } = args as {
+        dry_run?: boolean;
+        user_mappings?: Array<{ githubUsername: string; linearUserId: string }>;
+        organization_engineers?: string[];
+      };
+
+      try {
+        if (!process.env.PM_TOOL_API_KEY || !process.env.PM_TOOL_TEAM_ID) {
+          throw new Error("PM_TOOL_API_KEY and PM_TOOL_TEAM_ID must be configured");
+        }
+
+        const { syncEngineerComments } = await import("../sync/commentSync.js");
+        
+        const result = await syncEngineerComments({
+          dryRun: dry_run,
+          userMappings: user_mappings,
+          organizationEngineers: organization_engineers,
+        });
+
+        console.error(`[CommentSync] Completed: ${result.updated} updated, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.errors} errors`);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                ...result,
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logError("Comment sync failed:", error);
+        throw new Error(`Comment sync failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
