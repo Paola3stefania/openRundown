@@ -663,6 +663,7 @@ async function consolidateDuplicateEngineers(): Promise<void> {
   const allOwnerships = await (prisma as any).codeOwnership.findMany({
     select: {
       id: true,
+      filePath: true,
       engineer: true,
       engineerEmail: true,
       engineerName: true,
@@ -700,37 +701,69 @@ async function consolidateDuplicateEngineers(): Promise<void> {
     }
   }
   
-  // Update entries with numeric engineers
-  let mergedCount = 0;
+  // Group records by filePath to handle merges properly
+  const byFilePath = new Map<string, typeof allOwnerships>();
   for (const o of allOwnerships) {
-    if (!/^\d+$/.test(o.engineer)) continue; // Skip non-numeric
-    
-    // Try to find canonical by numeric ID in email
-    let canonical = numericToCanonical.get(o.engineer);
-    
-    // If not found by numeric ID, try by name
-    if (!canonical && o.engineerName) {
-      const byNameMatch = byName.get(o.engineerName.toLowerCase());
-      if (byNameMatch) {
-        canonical = { ...byNameMatch, name: o.engineerName };
-      }
+    if (!byFilePath.has(o.filePath)) {
+      byFilePath.set(o.filePath, []);
     }
-    
-    if (canonical && canonical.engineer !== o.engineer) {
-      await (prisma as any).codeOwnership.update({
-        where: { id: o.id },
-        data: { 
-          engineer: canonical.engineer,
-          engineerEmail: canonical.email || o.engineerEmail,
-          engineerName: canonical.name || o.engineerName,
-        },
-      });
-      mergedCount++;
+    byFilePath.get(o.filePath)!.push(o);
+  }
+  
+  let mergedCount = 0;
+  let deletedCount = 0;
+  
+  for (const [filePath, fileRecords] of byFilePath) {
+    for (const o of fileRecords) {
+      if (!/^\d+$/.test(o.engineer)) continue; // Skip non-numeric
+      
+      // Try to find canonical by numeric ID in email
+      let canonical = numericToCanonical.get(o.engineer);
+      
+      // If not found by numeric ID, try by name
+      if (!canonical && o.engineerName) {
+        const byNameMatch = byName.get(o.engineerName.toLowerCase());
+        if (byNameMatch) {
+          canonical = { ...byNameMatch, name: o.engineerName };
+        }
+      }
+      
+      if (!canonical || canonical.engineer === o.engineer) continue;
+      
+      // Check if there's already a record for this file + canonical engineer
+      const existingRecord = fileRecords.find(
+        (r: { id: string; engineer: string }) => r.engineer === canonical!.engineer && r.id !== o.id
+      );
+      
+      if (existingRecord) {
+        // Merge: add lines to existing record and delete this one
+        await (prisma as any).codeOwnership.update({
+          where: { id: existingRecord.id },
+          data: { 
+            linesAdded: (existingRecord.linesAdded || 0) + (o.linesAdded || 0),
+          },
+        });
+        await (prisma as any).codeOwnership.delete({
+          where: { id: o.id },
+        });
+        deletedCount++;
+      } else {
+        // No existing record, just update the engineer
+        await (prisma as any).codeOwnership.update({
+          where: { id: o.id },
+          data: { 
+            engineer: canonical.engineer,
+            engineerEmail: canonical.email || o.engineerEmail,
+            engineerName: canonical.name || o.engineerName,
+          },
+        });
+        mergedCount++;
+      }
     }
   }
   
-  if (mergedCount > 0) {
-    log(`[CodeOwnership] Merged ${mergedCount} duplicate engineer entries`);
+  if (mergedCount > 0 || deletedCount > 0) {
+    log(`[CodeOwnership] Consolidated: ${mergedCount} updated, ${deletedCount} merged/deleted`);
   } else {
     log(`[CodeOwnership] No duplicate engineers found to merge`);
   }
