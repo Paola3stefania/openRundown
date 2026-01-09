@@ -165,11 +165,19 @@ function extractGitHubUsername(email: string, authorName: string): string {
     if (!/^\d+$/.test(localPart)) {
       return localPart.toLowerCase();
     }
+    // Pure numeric noreply (old format) - use author name instead
+    if (/^\d+$/.test(localPart) && authorName && authorName.trim()) {
+      return authorName.toLowerCase().replace(/\s+/g, "-");
+    }
   }
   
-  // For regular emails, use the part before @
+  // For regular emails, use the part before @ (unless it's purely numeric)
   if (email.includes("@")) {
     const username = email.split("@")[0];
+    // If username is purely numeric and we have an author name, use the name
+    if (/^\d+$/.test(username) && authorName && authorName.trim()) {
+      return authorName.toLowerCase().replace(/\s+/g, "-");
+    }
     return username.toLowerCase();
   }
   
@@ -477,6 +485,165 @@ export async function calculateFeatureOwnership(): Promise<void> {
     }
 
     log(`[CodeOwnership] Feature ownership calculation complete for ${features.length} features`);
+    
+    // Also calculate ownership for Linear projects (linear-project-* IDs)
+    // These are stored in affectsFeatures JSON in groups and issues
+    log(`[CodeOwnership] Calculating ownership for Linear projects...`);
+    
+    // Extract unique linear-project entries from groups and issues
+    const linearProjects = new Map<string, string>(); // id -> name
+    
+    const groups = await prisma.group.findMany({
+      select: { affectsFeatures: true },
+    });
+    
+    const issues = await prisma.gitHubIssue.findMany({
+      select: { affectsFeatures: true },
+    });
+    
+    for (const g of groups) {
+      const features = g.affectsFeatures as Array<{ id: string; name: string }> | null;
+      for (const f of features || []) {
+        if (f.id?.startsWith('linear-project-')) {
+          linearProjects.set(f.id, f.name);
+        }
+      }
+    }
+    
+    for (const i of issues) {
+      const features = i.affectsFeatures as Array<{ id: string; name: string }> | null;
+      for (const f of features || []) {
+        if (f.id?.startsWith('linear-project-')) {
+          linearProjects.set(f.id, f.name);
+        }
+      }
+    }
+    
+    log(`[CodeOwnership] Found ${linearProjects.size} unique Linear projects`);
+    
+    for (const [projectId, projectName] of linearProjects) {
+      // Build search patterns from project name
+      const patterns: string[] = [];
+      const nameLower = projectName.toLowerCase();
+      patterns.push(nameLower);
+      patterns.push(nameLower.replace(/\s+/g, "-"));
+      patterns.push(nameLower.replace(/\s+/g, "_"));
+      patterns.push(nameLower.replace(/\s+/g, ""));
+      
+      // Add common variations
+      const words = nameLower.split(/\s+/);
+      for (const word of words) {
+        if (word.length > 3) {
+          patterns.push(word);
+        }
+      }
+      
+      const uniquePatterns = [...new Set(patterns)];
+      
+      // Find matching files
+      const matchingOwnerships = allFileOwnerships.filter((ownership: { filePath: string }) => {
+        const filePathLower = ownership.filePath.toLowerCase();
+        return uniquePatterns.some(pattern => 
+          filePathLower.includes(pattern) || 
+          filePathLower.includes(`/${pattern}/`) ||
+          filePathLower.includes(`/${pattern}.`) ||
+          filePathLower.includes(`-${pattern}`) ||
+          filePathLower.includes(`_${pattern}`)
+        );
+      });
+      
+      if (matchingOwnerships.length === 0) {
+        continue;
+      }
+      
+      log(`[CodeOwnership] Linear project "${projectName}": Found ${matchingOwnerships.length} matching file ownership records`);
+      
+      // Aggregate ownership by engineer
+      const engineerOwnership = new Map<string, { lines: number; files: Set<string>; email: string; name: string }>();
+      let totalLines = 0;
+      
+      for (const ownership of matchingOwnerships) {
+        const lines = ownership.linesAdded || 0;
+        totalLines += lines;
+        
+        if (!engineerOwnership.has(ownership.engineer)) {
+          engineerOwnership.set(ownership.engineer, {
+            lines: 0,
+            files: new Set(),
+            email: ownership.engineerEmail || "",
+            name: ownership.engineerName || "",
+          });
+        }
+        
+        const engineer = engineerOwnership.get(ownership.engineer)!;
+        engineer.lines += lines;
+        engineer.files.add(ownership.filePath);
+        if (!engineer.email && ownership.engineerEmail) {
+          engineer.email = ownership.engineerEmail;
+        }
+        if (!engineer.name && ownership.engineerName) {
+          engineer.name = ownership.engineerName;
+        }
+      }
+      
+      // Save ownership records for this Linear project
+      const projectOwnershipRecords: Array<{
+        featureId: string;
+        engineer: string;
+        engineerEmail: string;
+        engineerName: string;
+        percent: number;
+        filesCount: number;
+        totalLinesCount: number;
+      }> = [];
+      
+      for (const [engineer, data] of engineerOwnership) {
+        const percent = totalLines > 0 ? (data.lines / totalLines) * 100 : 0;
+        projectOwnershipRecords.push({
+          featureId: projectId, // Use linear-project-* ID
+          engineer,
+          engineerEmail: data.email,
+          engineerName: data.name,
+          percent,
+          filesCount: data.files.size,
+          totalLinesCount: data.lines,
+        });
+      }
+      
+      if (projectOwnershipRecords.length > 0) {
+        await prisma.$transaction(
+          projectOwnershipRecords.map(record => 
+            (prisma as any).featureOwnership.upsert({
+              where: {
+                featureId_engineer: {
+                  featureId: record.featureId,
+                  engineer: record.engineer,
+                },
+              },
+              create: {
+                featureId: record.featureId,
+                engineer: record.engineer,
+                engineerEmail: record.engineerEmail,
+                engineerName: record.engineerName,
+                ownershipPercent: record.percent,
+                filesCount: record.filesCount,
+                totalLines: record.totalLinesCount,
+              },
+              update: {
+                ownershipPercent: record.percent,
+                engineerEmail: record.engineerEmail,
+                engineerName: record.engineerName,
+                filesCount: record.filesCount,
+                totalLines: record.totalLinesCount,
+                lastUpdated: new Date(),
+              },
+            })
+          )
+        );
+      }
+    }
+    
+    log(`[CodeOwnership] Linear project ownership calculation complete for ${linearProjects.size} projects`);
   } catch (error) {
     log(`[CodeOwnership] Error calculating feature ownership: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
