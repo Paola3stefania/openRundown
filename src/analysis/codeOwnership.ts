@@ -644,9 +644,95 @@ export async function calculateFeatureOwnership(): Promise<void> {
     }
     
     log(`[CodeOwnership] Linear project ownership calculation complete for ${linearProjects.size} projects`);
+    
+    // Consolidate duplicate engineers (numeric IDs that should be merged with named engineers)
+    await consolidateDuplicateEngineers();
   } catch (error) {
     log(`[CodeOwnership] Error calculating feature ownership: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
+  }
+}
+
+/**
+ * Consolidate duplicate engineer entries by merging numeric IDs with named engineers
+ * E.g., "86073083" entries are merged into "bekacru" if we find matching email patterns
+ */
+async function consolidateDuplicateEngineers(): Promise<void> {
+  log(`[CodeOwnership] Consolidating duplicate engineers...`);
+  
+  const allOwnerships = await (prisma as any).codeOwnership.findMany({
+    select: {
+      id: true,
+      engineer: true,
+      engineerEmail: true,
+      engineerName: true,
+      linesAdded: true,
+    },
+  });
+  
+  // Build a map: numeric ID -> { canonicalEngineer, email, name }
+  // by looking at emails like "86073083+bekacru@users.noreply.github.com"
+  const numericToCanonical = new Map<string, { engineer: string; email: string; name: string }>();
+  
+  for (const o of allOwnerships) {
+    const email = o.engineerEmail || "";
+    // Match pattern: "123456+username@users.noreply.github.com"
+    const match = email.match(/^(\d+)\+([^@]+)@users\.noreply\.github\.com$/);
+    if (match) {
+      const numericId = match[1];
+      const username = match[2].toLowerCase();
+      numericToCanonical.set(numericId, {
+        engineer: username,
+        email: email,
+        name: o.engineerName || "",
+      });
+    }
+  }
+  
+  log(`[CodeOwnership] Found ${numericToCanonical.size} numeric ID mappings from emails`);
+  
+  // Also try to match by name
+  const byName = new Map<string, { engineer: string; email: string }>();
+  for (const o of allOwnerships) {
+    const name = o.engineerName?.toLowerCase();
+    if (name && !/^\d+$/.test(o.engineer)) {
+      byName.set(name, { engineer: o.engineer, email: o.engineerEmail || "" });
+    }
+  }
+  
+  // Update entries with numeric engineers
+  let mergedCount = 0;
+  for (const o of allOwnerships) {
+    if (!/^\d+$/.test(o.engineer)) continue; // Skip non-numeric
+    
+    // Try to find canonical by numeric ID in email
+    let canonical = numericToCanonical.get(o.engineer);
+    
+    // If not found by numeric ID, try by name
+    if (!canonical && o.engineerName) {
+      const byNameMatch = byName.get(o.engineerName.toLowerCase());
+      if (byNameMatch) {
+        canonical = { ...byNameMatch, name: o.engineerName };
+      }
+    }
+    
+    if (canonical && canonical.engineer !== o.engineer) {
+      await (prisma as any).codeOwnership.update({
+        where: { id: o.id },
+        data: { 
+          engineer: canonical.engineer,
+          engineerEmail: canonical.email || o.engineerEmail,
+          engineerName: canonical.name || o.engineerName,
+        },
+      });
+      mergedCount++;
+    }
+  }
+  
+  if (mergedCount > 0) {
+    log(`[CodeOwnership] Merged ${mergedCount} duplicate engineer entries`);
+  } else {
+    log(`[CodeOwnership] No duplicate engineers found to merge`);
   }
 }
 
