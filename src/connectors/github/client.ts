@@ -386,16 +386,15 @@ async function batchFetchIssueDetails(
     
     console.error(`[GitHub] Fetching batch ${batchNum}/${totalBatches} (${batch.length} issues, batch size: ${currentBatchSize})...`);
     
-    // Get current token before batch (may rotate if previous was exhausted)
+    // Get current token before batch - use proactive rotation to avoid hitting limits
     let currentToken = await getToken(tokenOrManager);
     
-    // If using token manager and token is exhausted, try to get next available
+    // If using token manager, use proactive rotation (rotate when <= 2 remaining)
     if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
-      const availableToken = await tokenOrManager.getNextAvailableToken();
-      if (availableToken) {
-        currentToken = availableToken;
-      } else {
-        // All tokens exhausted - check if we can get a new one via OAuth
+      currentToken = await tokenOrManager.getTokenWithProactiveRotation(2);
+      
+      // Check if all tokens are exhausted
+      if (tokenOrManager.areAllTokensExhausted()) {
         const status = tokenOrManager.getStatus();
         const nextReset = Math.min(...status.map(s => s.resetIn));
         
@@ -622,9 +621,14 @@ export async function fetchAllGitHubIssues(
     
     console.error(`[GitHub] Fetching open issues page ${page}...`);
     
-      // Get current token (may rotate if previous was exhausted)
-      const currentToken = await getToken(tokenOrManager);
-      headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      // Get current token with proactive rotation (rotate when <= 2 remaining)
+      let currentToken: string | undefined;
+      if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+        currentToken = await tokenOrManager.getTokenWithProactiveRotation(2);
+      } else {
+        currentToken = await getToken(tokenOrManager);
+      }
+      headers = await createHeaders(tokenOrManager, currentToken); // Use specific token
       
       // Determine token type for logging
       let currentTokenType: 'app' | 'regular' | 'unknown' = 'unknown';
@@ -891,9 +895,14 @@ export async function fetchAllGitHubIssues(
       
       console.error(`[GitHub] Fetching closed issues page ${page}...`);
       
-      // Get current token (may rotate if previous was exhausted)
-      const currentToken = await getToken(tokenOrManager);
-      headers = await createHeaders(tokenOrManager); // Refresh headers with current token
+      // Get current token with proactive rotation (rotate when <= 2 remaining)
+      let currentToken: string | undefined;
+      if (tokenOrManager && tokenOrManager instanceof GitHubTokenManager) {
+        currentToken = await tokenOrManager.getTokenWithProactiveRotation(2);
+      } else {
+        currentToken = await getToken(tokenOrManager);
+      }
+      headers = await createHeaders(tokenOrManager, currentToken); // Use specific token
       
       // Determine token type for logging
       let currentTokenType: 'app' | 'regular' | 'unknown' = 'unknown';

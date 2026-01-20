@@ -304,8 +304,9 @@ export class GitHubTokenManager {
 
   /**
    * Check if a specific token has available requests
+   * @param minRemaining Minimum remaining requests to consider "available" (default: 1)
    */
-  private hasAvailableRequestsForToken(tokenInfo: TokenInfo): boolean {
+  private hasAvailableRequestsForToken(tokenInfo: TokenInfo, minRemaining: number = 1): boolean {
     // If reset time has passed, assume limit is reset
     if (Date.now() >= tokenInfo.resetAt) {
       tokenInfo.remaining = tokenInfo.limit;
@@ -313,7 +314,55 @@ export class GitHubTokenManager {
       return true;
     }
     
-    return tokenInfo.remaining > 0;
+    return tokenInfo.remaining >= minRemaining;
+  }
+
+  /**
+   * Check if we should proactively rotate to avoid hitting rate limit
+   * Returns true if current token has <= threshold remaining
+   */
+  shouldRotateProactively(tokenString?: string, threshold: number = 2): boolean {
+    const tokenInfo = tokenString 
+      ? this.tokens.find(t => t.token === tokenString)
+      : this.tokens[this.currentIndex];
+    
+    if (!tokenInfo) return false;
+    
+    // If reset time has passed, no need to rotate
+    if (Date.now() >= tokenInfo.resetAt) {
+      return false;
+    }
+    
+    return tokenInfo.remaining <= threshold;
+  }
+
+  /**
+   * Get token with proactive rotation - rotates BEFORE hitting limit
+   * If current token has <= threshold remaining, tries to get another token first
+   */
+  async getTokenWithProactiveRotation(threshold: number = 2): Promise<string> {
+    const currentToken = await this.getCurrentToken();
+    const tokenInfo = this.tokens.find(t => t.token === currentToken);
+    
+    if (tokenInfo && tokenInfo.remaining <= threshold && tokenInfo.remaining > 0) {
+      // Log the proactive rotation
+      const tokenType = tokenInfo.isAppToken ? 'GitHub App' : 'regular';
+      console.error(`[GitHub Token Manager] Proactive rotation: ${tokenType} token has only ${tokenInfo.remaining} requests remaining`);
+      
+      // Try to find another token with more remaining
+      const otherTokens = this.tokens.filter(t => t.token !== currentToken && !t.isAppToken);
+      for (const other of otherTokens) {
+        if (this.hasAvailableRequestsForToken(other, threshold + 1)) {
+          console.error(`[GitHub Token Manager] Rotating to token with ${other.remaining} remaining`);
+          return other.token;
+        }
+      }
+      
+      // No better token found, use current
+      console.error(`[GitHub Token Manager] No better token available, using current (${tokenInfo.remaining} remaining)`);
+    }
+    
+    return currentToken;
   }
 
   /**

@@ -607,7 +607,8 @@ async function fetchPRsForIssue(
   const repoName = config.github.repo;
   
   try {
-    const token = await tokenManager.getCurrentToken();
+    // Use proactive rotation - rotate BEFORE hitting limit (when <= 2 remaining)
+    let token = await tokenManager.getTokenWithProactiveRotation(2);
     // Use GitHub's REST API to search for PRs that reference this issue
     // Search for PRs that mention the issue number (try multiple formats)
     // Also try searching for the issue number with different patterns
@@ -621,7 +622,7 @@ async function fetchPRsForIssue(
     const searchQuery = searchQueries[0];
     const url = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100`;
     
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       headers: {
         Accept: "application/vnd.github.v3+json",
         Authorization: `Bearer ${token}`,
@@ -629,6 +630,59 @@ async function fetchPRsForIssue(
     });
     
     tokenManager.updateRateLimitFromResponse(response, token);
+    
+    // Handle rate limit errors - Search API has separate 30 req/min limit!
+    if (response.status === 403 || response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After');
+      const rateLimitRemaining = response.headers.get('X-RateLimit-Remaining');
+      const rateLimitLimit = response.headers.get('X-RateLimit-Limit');
+      
+      // Search API has 30/min limit (separate from 5000/hour core API)
+      const isSearchLimit = rateLimitLimit === '30';
+      
+      if (isSearchLimit) {
+        log(`[PR Sync] Search API rate limit hit (30/min) for issue #${issueNumber}`);
+        // Wait for search API reset (usually ~60 seconds)
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 60000;
+        log(`[PR Sync] Waiting ${Math.ceil(waitTime / 1000)}s for Search API reset...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        // Retry after waiting
+        response = await fetch(url, {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        tokenManager.updateRateLimitFromResponse(response, token);
+      } else {
+        // Core API rate limit - try token rotation
+        const status = tokenManager.getStatus();
+        log(`[PR Sync] Core API rate limit hit for issue #${issueNumber}. Token status: ${status.map(t => `Token ${t.index}: ${t.remaining}/${t.limit}`).join(', ')}`);
+        
+        // Try to get next available token
+        const nextToken = await tokenManager.getNextAvailableToken();
+        if (nextToken && nextToken !== token) {
+          log(`[PR Sync] Rotating to next available token...`);
+          token = nextToken;
+          
+          // Retry with new token
+          response = await fetch(url, {
+            headers: {
+              Accept: "application/vnd.github.v3+json",
+              Authorization: `Bearer ${token}`,
+            },
+          });
+          tokenManager.updateRateLimitFromResponse(response, token);
+        } else {
+          // All tokens exhausted
+          const resetTimes = tokenManager.getResetTimesByType();
+          const allResets = [...resetTimes.appTokens, ...resetTimes.regularTokens];
+          const nextReset = allResets.length > 0 ? Math.min(...allResets.map(t => t.resetIn)) : 0;
+          logError(`[PR Sync] All tokens exhausted! Next reset in ~${nextReset} minutes`);
+        }
+      }
+    }
     
     if (!response.ok) {
       logError(`[PR Sync] Failed to search PRs for issue #${issueNumber}: ${response.status}`);
@@ -1472,6 +1526,7 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
       
       // If no PRs found in map, try fetching directly from GitHub using search
       // This catches PRs that are linked but don't mention the issue in text, or were merged >90 days ago
+      // NOTE: Search API has 30 requests/minute limit, so we add delays between calls
       if (allPRsForIssue.length === 0 && tokenManager) {
         log(`[PR Sync] No PRs found in map for issue #${issue.issueNumber}, trying GitHub search...`);
         try {
@@ -1482,6 +1537,8 @@ export async function syncPRBasedStatus(options: SyncOptions = {}): Promise<Sync
             // Add to map for future reference
             issueToPRsMap.set(issue.issueNumber, searchPRs);
           }
+          // Add 2.5s delay between search calls to stay under 30/min limit
+          await new Promise(resolve => setTimeout(resolve, 2500));
         } catch (error) {
           logError(`[PR Sync] Error fetching PRs for issue #${issue.issueNumber}:`, error);
         }
