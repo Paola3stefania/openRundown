@@ -1229,7 +1229,7 @@ export async function exportGroupingToPMTool(
     if (pmToolConfig.type === "linear") {
       const linearTool = pmTool as import("./base.js").LinearPMTool;
       if (linearTool.validateTeam) {
-        await linearTool.validateTeam(true, "OpenMemory");
+        await linearTool.validateTeam(true, "OpenRundown");
         if (linearTool.teamId && !pmToolConfig.team_id) {
           pmToolConfig.team_id = linearTool.teamId;
         }
@@ -3311,7 +3311,7 @@ export async function exportIssuesToPMTool(
     if (pmToolConfig.type === "linear") {
       linearTool = pmTool as import("./base.js").LinearPMTool;
       if (linearTool.validateTeam) {
-        await linearTool.validateTeam(true, "OpenMemory");
+        await linearTool.validateTeam(true, "OpenRundown");
         if (linearTool.teamId && !pmToolConfig.team_id) {
           pmToolConfig.team_id = linearTool.teamId;
         }
@@ -4398,15 +4398,15 @@ export async function exportIssuesToPMTool(
                   const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
                   if (errorMsg.includes("Discrepancy between issue team") && updates.project_id && currentLinearIssue) {
                     const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
-                    log(`  Project assignment failed for group ${group.id} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with OpenMemory team...`);
+                    log(`  Project assignment failed for group ${group.id} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with OpenRundown team...`);
                     
-                    // Try to update the project to associate with OpenMemory team
+                    // Try to update the project to associate with OpenRundown team
                     const updateProjectMethod = (linearTool as any).updateProjectTeam;
                     if (updateProjectMethod && typeof updateProjectMethod === 'function') {
                       try {
                         const projectUpdated = await updateProjectMethod.call(linearTool, updates.project_id);
                         if (projectUpdated) {
-                          log(`  Successfully updated project ${updates.project_id} to associate with OpenMemory team, retrying group update...`);
+                          log(`  Successfully updated project ${updates.project_id} to associate with OpenRundown team, retrying group update...`);
                           // Retry the full update now that project is workspace-level
                           try {
                             await updateIssueMethod.call(linearTool, group.linearIssueId, updates);
@@ -4680,15 +4680,15 @@ export async function exportIssuesToPMTool(
                   const errorMsg = updateError instanceof Error ? updateError.message : String(updateError);
                   if (errorMsg.includes("Discrepancy between issue team") && updates.project_id && currentLinearIssue) {
                     const issueTeam = currentLinearIssue.teamName || currentLinearIssue.teamId || "unknown";
-                    log(`  Project assignment failed for issue #${issue.issueNumber} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with OpenMemory team...`);
+                    log(`  Project assignment failed for issue #${issue.issueNumber} (team mismatch: issue belongs to team "${issueTeam}"), attempting to update project to associate with OpenRundown team...`);
                     
-                    // Try to update the project to associate with OpenMemory team
+                    // Try to update the project to associate with OpenRundown team
                     const updateProjectMethod = (linearTool as any).updateProjectTeam;
                     if (updateProjectMethod && typeof updateProjectMethod === 'function') {
                       try {
                         const projectUpdated = await updateProjectMethod.call(linearTool, updates.project_id);
                         if (projectUpdated) {
-                          log(`  Successfully updated project ${updates.project_id} to associate with OpenMemory team, retrying issue update...`);
+                          log(`  Successfully updated project ${updates.project_id} to associate with OpenRundown team, retrying issue update...`);
                           // Retry the full update now that project is workspace-level
                           try {
                             await updateIssueMethod.call(linearTool, issue.linearIssueId, updates);

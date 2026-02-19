@@ -1,6 +1,6 @@
 # GitHub Integration
 
-OpenMemory requires GitHub authentication to fetch issues and comments. Choose one method:
+OpenRundown requires GitHub authentication to fetch issues and comments. Choose one method:
 
 ## Option 1: Personal Access Token (Simple)
 

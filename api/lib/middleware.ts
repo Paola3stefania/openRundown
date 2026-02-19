@@ -20,13 +20,13 @@ function getHeader(req: VercelRequest, name: string): string | null {
 
 /**
  * Verify API key from request headers
- * Checks against OPENMEMORY_API_KEY environment variable
+ * Checks against OPENRUNDOWN_API_KEY environment variable
  */
 export function verifyApiKey(req: VercelRequest): AuthResult {
-  const apiKey = process.env.OPENMEMORY_API_KEY || process.env.UNMUTE_API_KEY;
+  const apiKey = process.env.OPENRUNDOWN_API_KEY || process.env.UNMUTE_API_KEY;
   
   if (!apiKey) {
-    console.error("[Auth] OPENMEMORY_API_KEY not configured");
+    console.error("[Auth] OPENRUNDOWN_API_KEY not configured");
     return {
       valid: false,
       error: "API key not configured on server",

@@ -1,5 +1,5 @@
 /**
- * Prisma client singleton for OpenMemory
+ * Prisma client singleton for OpenRundown
  * Provides type-safe database access
  */
 

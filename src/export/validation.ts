@@ -35,7 +35,7 @@ export function validatePMSetup(): ValidationResult {
 
   // Check Team ID (optional)
   if (!process.env.PM_TOOL_TEAM_ID) {
-    result.info.push("PM_TOOL_TEAM_ID not set - OpenMemory team will be auto-created");
+    result.info.push("PM_TOOL_TEAM_ID not set - OpenRundown team will be auto-created");
   } else {
     result.info.push("Team ID is configured");
   }

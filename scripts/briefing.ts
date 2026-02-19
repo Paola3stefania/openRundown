@@ -40,7 +40,7 @@ async function main() {
   if (jsonOutput) {
     process.stdout.write(JSON.stringify(output, null, 2) + "\n");
   } else {
-    console.log("=== OpenMemory Briefing ===\n");
+    console.log("=== openrundown Briefing ===\n");
     console.log(`Project: ${briefing.project}`);
     if (briefing.focus) console.log(`Focus: ${briefing.focus}`);
     console.log(`Updated: ${briefing.lastUpdated}\n`);

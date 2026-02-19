@@ -2,7 +2,7 @@
  * Project auto-detection
  *
  * Determines a stable project identifier from the environment:
- *   1. OPENMEMORY_PROJECT env var  (explicit override)
+ *   1. OPENRUNDOWN_PROJECT env var  (explicit override)
  *   2. git remote origin  (owner/repo)
  *   3. GITHUB_OWNER + GITHUB_REPO env vars
  *   4. basename of cwd
@@ -45,7 +45,7 @@ function detectFromGitRemote(): string | null {
 }
 
 function detectFromEnv(): string | null {
-  const explicit = process.env.OPENMEMORY_PROJECT;
+  const explicit = process.env.OPENRUNDOWN_PROJECT;
   if (explicit) return explicit;
 
   const owner = process.env.GITHUB_OWNER;

@@ -1,6 +1,6 @@
 # Linear Team Setup
 
-How to configure and use Linear teams with OpenMemory.
+How to configure and use Linear teams with OpenRundown.
 
 ## Overview
 
@@ -23,8 +23,8 @@ The team ID can be:
 ### Auto-Creation
 
 **If `PM_TOOL_TEAM_ID` is not set:**
-- The system will automatically create a team named "OpenMemory" on first export
-- The team will be created with key "OPENMEMORY"
+- The system will automatically create a team named "OpenRundown" on first export
+- The team will be created with key "OPENRUNDOWN"
 - This ensures projects and issues are properly organized even without manual configuration
 
 ### Finding Your Team ID
@@ -51,7 +51,7 @@ query GetTeams {
 2. Click on your team
 3. The team ID can be found in the URL or team settings
 
-**Option 3: Use OpenMemory's Team Listing** (if implemented)
+**Option 3: Use OpenRundown's Team Listing** (if implemented)
 
 The Linear integration can list teams programmatically. Check the implementation for available methods.
 

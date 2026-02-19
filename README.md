@@ -1,26 +1,26 @@
-# OpenMemory
+# OpenRundown
 
-**Give your AI agents memory.** OpenMemory is an MCP server and Cursor plugin that gives every agent session a briefing -- active issues, recent decisions, and open items from past sessions -- so no agent ever starts blind.
+**Give your AI agents memory.** OpenRundown is an MCP server and Cursor plugin that gives every agent session a briefing -- active issues, recent decisions, and open items from past sessions -- so no agent ever starts blind.
 
 ## The Problem
 
 Every time you open a new Cursor chat, the agent starts from zero. It doesn't know what you worked on yesterday, what decisions were made, which issues are critical, or what the last agent left unfinished. You end up repeating context, re-explaining decisions, and watching agents redo work that was already done.
 
-## How OpenMemory Solves It
+## How OpenRundown Solves It
 
-OpenMemory sits between your project signals (GitHub, Discord, past sessions) and your AI agents. It compresses everything into a compact briefing (~300-500 tokens) that the agent reads at session start.
+OpenRundown sits between your project signals (GitHub, Discord, past sessions) and your AI agents. It compresses everything into a compact briefing (~300-500 tokens) that the agent reads at session start.
 
 ```
 GitHub Issues + Discord Threads + Past Sessions
                     |
-              [ OpenMemory ]
+              [ OpenRundown ]
                     |
             Compact Briefing JSON
                     |
          Agent starts with full context
 ```
 
-When the session ends, OpenMemory saves what happened -- decisions made, files edited, open items -- so the *next* agent picks up exactly where this one left off.
+When the session ends, OpenRundown saves what happened -- decisions made, files edited, open items -- so the *next* agent picks up exactly where this one left off.
 
 ## What Agents Get
 
@@ -38,13 +38,13 @@ This all fits in ~300-500 tokens. No vector search needed at query time.
 
 ### As a Cursor Plugin
 
-OpenMemory ships as a Cursor plugin with rules, skills, hooks, and an MCP server bundled together. The plugin auto-briefs agents at session start and auto-saves sessions on end.
+OpenRundown ships as a Cursor plugin with rules, skills, hooks, and an MCP server bundled together. The plugin auto-briefs agents at session start and auto-saves sessions on end.
 
 ```
 .cursor-plugin/plugin.json   -- plugin manifest
 mcp.json                      -- MCP server config
-rules/openmemory.mdc         -- session protocol (always applied)
-skills/openmemory/SKILL.md   -- detailed agent instructions
+rules/openrundown.mdc        -- session protocol (always applied)
+skills/openrundown/SKILL.md  -- detailed agent instructions
 hooks/hooks.json              -- sessionEnd hook
 agents/session-tracker.md     -- session tracking agent
 ```
@@ -53,8 +53,8 @@ agents/session-tracker.md     -- session tracking agent
 
 1. Clone and install:
    ```bash
-   git clone https://github.com/Paola3stefania/openMemory.git
-   cd openMemory
+   git clone https://github.com/Paola3stefania/openrundown.git
+   cd openrundown
    npm install && npm run build
    ```
 
@@ -67,7 +67,7 @@ agents/session-tracker.md     -- session tracking agent
 
 3. Database (optional, for persistent storage):
    ```bash
-   createdb openmemory && npx prisma migrate deploy
+   createdb openrundown && npx prisma migrate deploy
    ```
 
 4. Add to Cursor: See `cursor-mcp-config.json.example` for MCP configuration.
@@ -94,7 +94,7 @@ npm run briefing -- --scope auth    # Scoped to a specific area
 
 ## Signal Pipeline
 
-OpenMemory's briefings are powered by a signal pipeline that ingests, classifies, and compresses project data. You can use the pipeline tools directly or let the complete workflow handle everything:
+OpenRundown's briefings are powered by a signal pipeline that ingests, classifies, and compresses project data. You can use the pipeline tools directly or let the complete workflow handle everything:
 
 ```bash
 sync_classify_and_export   # Runs the full pipeline end to end
@@ -114,7 +114,7 @@ sync_classify_and_export   # Runs the full pipeline end to end
 
 ### AI-Powered Fixes
 
-OpenMemory can investigate issues, learn from your merged PRs, generate fixes, and open draft PRs:
+OpenRundown can investigate issues, learn from your merged PRs, generate fixes, and open draft PRs:
 
 ```bash
 fix_github_issue(issue_number: 1234)   # Investigate + generate fix + open PR

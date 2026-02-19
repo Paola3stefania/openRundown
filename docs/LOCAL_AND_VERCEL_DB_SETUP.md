@@ -27,10 +27,10 @@ brew services start postgresql@14
 
 ```bash
 # Create database
-createdb openmemory
+createdb openrundown
 
 # Verify it was created
-psql -l | grep openmemory
+psql -l | grep openrundown
 ```
 
 If you get permission errors, try:
@@ -50,10 +50,10 @@ Create/update your `.env` file:
 # =============================================================================
 # Local Development Database
 # =============================================================================
-DATABASE_URL=postgresql://$(whoami)@localhost:5432/openmemory
+DATABASE_URL=postgresql://$(whoami)@localhost:5432/openrundown
 
 # On macOS, usually no password needed. If you have a password:
-# DATABASE_URL=postgresql://username:password@localhost:5432/openmemory
+# DATABASE_URL=postgresql://username:password@localhost:5432/openrundown
 
 # =============================================================================
 # Your other config...
@@ -66,7 +66,7 @@ GITHUB_REPO_URL=owner/repo
 
 **Note:** The `$(whoami)` will use your macOS username. You can also hardcode it:
 ```env
-DATABASE_URL=postgresql://your_username@localhost:5432/openmemory
+DATABASE_URL=postgresql://your_username@localhost:5432/openrundown
 ```
 
 ## Step 4: Run Migrations Locally
@@ -114,7 +114,7 @@ npm run db:migrate
 
 ### Local Development (.env)
 ```env
-DATABASE_URL=postgresql://$(whoami)@localhost:5432/openmemory
+DATABASE_URL=postgresql://$(whoami)@localhost:5432/openrundown
 ```
 
 ### Vercel Production (Environment Variables in Dashboard)
@@ -126,7 +126,7 @@ DATABASE_URL=postgres://...@...vercel-storage.com/...
 
 ```bash
 # Connect to database
-psql openmemory
+psql openrundown
 
 # List tables
 \dt
@@ -158,20 +158,20 @@ brew services start postgresql@14
 whoami
 
 # Use that in DATABASE_URL
-DATABASE_URL=postgresql://$(whoami)@localhost:5432/openmemory
+DATABASE_URL=postgresql://$(whoami)@localhost:5432/openrundown
 ```
 
 ### Database already exists
 ```bash
 # Drop and recreate (WARNING: deletes all data)
-dropdb openmemory
-createdb openmemory
+dropdb openrundown
+createdb openrundown
 npm run db:migrate
 ```
 
 ## Summary
 
-- **Local**: `DATABASE_URL=postgresql://username@localhost:5432/openmemory` in `.env`
+- **Local**: `DATABASE_URL=postgresql://username@localhost:5432/openrundown` in `.env`
 - **Vercel**: `DATABASE_URL=postgres://...@...vercel-storage.com/...` in Vercel Environment Variables
 - Both use the same Prisma schema and migrations
 - Run `npm run db:migrate` for both environments

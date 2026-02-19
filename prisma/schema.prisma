@@ -1,4 +1,4 @@
-// Prisma schema for OpenMemory Database
+// Prisma schema for OpenRundown Database
 // Generated from existing migrations
 
 generator client {

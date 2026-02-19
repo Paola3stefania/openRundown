@@ -62,7 +62,7 @@ async function main() {
   }
 
   if (closedCount > 0) {
-    console.log(`[openmemory] Auto-closed ${closedCount} open session(s)`);
+    console.log(`[openrundown] Auto-closed ${closedCount} open session(s)`);
   }
 
   await prisma.$disconnect();
@@ -70,6 +70,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("[openmemory] Failed to save session:", err.message);
+  console.error("[openrundown] Failed to save session:", err.message);
   process.exit(0);
 });

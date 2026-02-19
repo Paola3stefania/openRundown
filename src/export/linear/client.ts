@@ -224,7 +224,7 @@ export class LinearIntegration extends BasePMTool {
       input: {
         name: sanitizedName,
         description: sanitizedDescription,
-        // Associate project with OpenMemory team to ensure compatibility with issues
+        // Associate project with OpenRundown team to ensure compatibility with issues
         // Only include teamIds if teamId is valid (non-empty string)
         ...(this.teamId && this.teamId.trim() && { teamIds: [this.teamId] }),
       },
@@ -329,9 +329,9 @@ export class LinearIntegration extends BasePMTool {
   }
 
   /**
-   * Update project to associate with OpenMemory team
-   * Adds OpenMemory team to existing teams (doesn't remove existing teams)
-   * This makes projects compatible with issues from the OpenMemory team
+   * Update project to associate with OpenRundown team
+   * Adds OpenRundown team to existing teams (doesn't remove existing teams)
+   * This makes projects compatible with issues from the OpenRundown team
    */
   async updateProjectTeam(projectId: string): Promise<boolean> {
     if (!this.teamId) {
@@ -346,13 +346,13 @@ export class LinearIntegration extends BasePMTool {
       return false;
     }
 
-    // Check if OpenMemory team is already in the project's teams
+    // Check if OpenRundown team is already in the project's teams
     if (currentProject.teamIds.includes(this.teamId)) {
       log(`Project ${projectId} already associated with team ${this.teamId}`);
       return true;
     }
 
-    // Add OpenMemory team to existing teams (don't remove existing teams)
+    // Add OpenRundown team to existing teams (don't remove existing teams)
     const updatedTeamIds = [...new Set([...currentProject.teamIds, this.teamId])];
 
     const query = `
@@ -379,7 +379,7 @@ export class LinearIntegration extends BasePMTool {
       }>(query, {
         id: projectId,
         input: {
-          teamIds: updatedTeamIds, // Add OpenMemory team to existing teams
+          teamIds: updatedTeamIds, // Add OpenRundown team to existing teams
         },
       });
 
@@ -756,7 +756,7 @@ export class LinearIntegration extends BasePMTool {
    * If team doesn't exist, creates it automatically
    */
   async createOrGetTeam(teamName: string, teamKey?: string): Promise<string> {
-    // If teamKey not provided, generate from teamName (e.g., "OpenMemory" -> "OPENMEMORY")
+    // If teamKey not provided, generate from teamName (e.g., "OpenRundown" -> "OPENRUNDOWN")
     const key = teamKey || teamName.toUpperCase().replace(/[^A-Z0-9]/g, "").substring(0, 20);
     
     // First, try to find existing team by name or key
@@ -827,7 +827,7 @@ export class LinearIntegration extends BasePMTool {
    * Validate that the configured team ID exists
    * If no team ID is configured, optionally create a default team
    */
-  async validateTeam(createIfMissing: boolean = false, defaultTeamName: string = "OpenMemory"): Promise<boolean> {
+  async validateTeam(createIfMissing: boolean = false, defaultTeamName: string = "OpenRundown"): Promise<boolean> {
     if (!this.teamId) {
       if (createIfMissing) {
         log(`No team ID configured, creating default team: ${defaultTeamName}`);

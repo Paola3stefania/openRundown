@@ -122,12 +122,12 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 // Create MCP server
 const mcpServer = new McpServer(
   {
-  name: "openmemory",
+  name: "openrundown",
   version: "1.0.0",
   },
   {
     instructions: [
-      "OpenMemory provides project context and session memory for AI agents.",
+      "OpenRundown provides project context and session memory for AI agents.",
       "",
       "At the START of every conversation:",
       "1. Call get_agent_briefing to understand the current project state (active issues, recent decisions, open items, user signals from Discord/GitHub)",
@@ -890,8 +890,8 @@ const tools: Tool[] = [
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'OpenMemory')",
-          default: "OpenMemory",
+          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
+          default: "OpenRundown",
         },
         limit: {
           type: "number",
@@ -915,8 +915,8 @@ const tools: Tool[] = [
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'OpenMemory')",
-          default: "OpenMemory",
+          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
+          default: "OpenRundown",
         },
         limit: {
           type: "number",
@@ -10333,7 +10333,7 @@ Example output:
     }
 
     case "classify_linear_issues": {
-      const { team_name = "OpenMemory", limit = 250, create_projects = true } = args as {
+      const { team_name = "OpenRundown", limit = 250, create_projects = true } = args as {
         team_name?: string;
         limit?: number;
         create_projects?: boolean;
@@ -10818,7 +10818,7 @@ Example output:
     }
 
     case "label_linear_issues": {
-      const { team_name = "OpenMemory", limit = 100, dry_run = false } = args as {
+      const { team_name = "OpenRundown", limit = 100, dry_run = false } = args as {
         team_name?: string;
         limit?: number;
         dry_run?: boolean;
@@ -12092,7 +12092,7 @@ Example output:
 // Start the server
 async function main() {
   const projectId = detectProjectId();
-  console.error(`[OpenMemory] Project: ${projectId}`);
+  console.error(`[OpenRundown] Project: ${projectId}`);
 
   // Start MCP server FIRST so Cursor can communicate with it
   const transport = new StdioServerTransport();

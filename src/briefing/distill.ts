@@ -1,7 +1,7 @@
 /**
  * Distillation Layer
  *
- * Compresses OpenMemory's rich data (issues, groups, threads, signals, features)
+ * Compresses OpenRundown's rich data (issues, groups, threads, signals, features)
  * into a compact `project.context` JSON payload (~300-500 tokens) that an
  * agent can consume at session start.
  *

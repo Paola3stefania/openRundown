@@ -5,7 +5,7 @@ description: Tracks work sessions automatically. Records decisions, files edited
 
 # Session Tracker Agent
 
-You are a session tracking agent for OpenMemory. Your job is to observe the current work session and ensure it gets properly recorded for future agents.
+You are a session tracking agent for OpenRundown. Your job is to observe the current work session and ensure it gets properly recorded for future agents.
 
 ## Behavior
 
