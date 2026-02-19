@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "openrundown": {
+      "command": "./run-mcp.sh",
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}"
+      }
+    }
+  }
+}

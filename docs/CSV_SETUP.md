@@ -16,7 +16,7 @@ Your CSV file should have the following columns:
 
 ```csv
 Name,Email,Role,Teams,Active,GitHub Username
-"Paola Estefanía",paola@better-auth.com,admin,"UnMute; Engineering",active,paola-github
+"Paola Estefanía",paola@better-auth.com,admin,"OpenRundown; Engineering",active,paola-github
 "Alex Yang",alex@better-auth.com,member,"Engineering; Open Source",active,alex-yang
 ```
 

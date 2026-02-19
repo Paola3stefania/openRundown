@@ -884,14 +884,14 @@ const tools: Tool[] = [
   },
   {
     name: "classify_linear_issues",
-    description: "Fetch all issues from Linear UNMute team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
+    description: "Fetch all issues from the configured Linear team and classify them with existing projects (features) or create new projects if needed. Requires PM_TOOL_API_KEY and PM_TOOL_TEAM_ID.",
     inputSchema: {
       type: "object",
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'UNMute')",
-          default: "UNMute",
+          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
+          default: "OpenRundown",
         },
         limit: {
           type: "number",
@@ -915,8 +915,8 @@ const tools: Tool[] = [
       properties: {
         team_name: {
           type: "string",
-          description: "Linear team name to fetch issues from (default: 'UNMute')",
-          default: "UNMute",
+          description: "Linear team name to fetch issues from (default: 'OpenRundown')",
+          default: "OpenRundown",
         },
         limit: {
           type: "number",
@@ -10333,7 +10333,7 @@ Example output:
     }
 
     case "classify_linear_issues": {
-      const { team_name = "UNMute", limit = 250, create_projects = true } = args as {
+      const { team_name = "OpenRundown", limit = 250, create_projects = true } = args as {
         team_name?: string;
         limit?: number;
         create_projects?: boolean;
@@ -10818,7 +10818,7 @@ Example output:
     }
 
     case "label_linear_issues": {
-      const { team_name = "UNMute", limit = 100, dry_run = false } = args as {
+      const { team_name = "OpenRundown", limit = 100, dry_run = false } = args as {
         team_name?: string;
         limit?: number;
         dry_run?: boolean;

@@ -1,0 +1,12 @@
+---
+description: OpenRundown session protocol - agents get briefed at start and save progress at end
+alwaysApply: true
+---
+
+openrundown-session-protocol:
+
+- At the start of every conversation, call `get_agent_briefing` and `get_session_history` from the openrundown MCP server before responding.
+- If a previous session has `open_items`, proactively mention them to the user.
+- When doing meaningful work (not just answering questions), call `start_agent_session` with the scope of work.
+- At the end of meaningful work, call `end_agent_session` recording decisions_made, files_edited, open_items, and a summary.
+- Decisions should include the "why", not just the "what". Open items should be specific and actionable.

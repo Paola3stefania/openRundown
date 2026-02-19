@@ -1,6 +1,6 @@
 ---
 name: openrundown
-description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent. Triggers when working on any project with OpenRundown configured.
+description: Provides project context and session memory for AI agents via the OpenRundown MCP server. Use at the start of every conversation to get a briefing on active issues, recent decisions, and open items. Use during work sessions to record decisions and progress for the next agent.
 ---
 
 # OpenRundown
@@ -11,7 +11,7 @@ OpenRundown gives you persistent memory across sessions. It distills signals fro
 
 Always do this before responding to the user:
 
-1. Call `get_agent_briefing` from the `user-openrundown` MCP server
+1. Call `get_agent_briefing` from the openrundown MCP server
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 2. Call `get_session_history` with `limit: 3` to see recent sessions

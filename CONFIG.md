@@ -40,7 +40,7 @@ These help scripts find channels by name:
 **Default behavior:** If `DATABASE_URL` is set → PostgreSQL, otherwise → JSON files
 
 ### Database Configuration (for PostgreSQL backend)
-- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/unmute_mcp`)
+- `DATABASE_URL` - PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/openrundown`)
 - OR use individual variables:
   - `DB_HOST` - Database host (default: "localhost")
   - `DB_PORT` - Database port (default: 5432)

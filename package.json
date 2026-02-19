@@ -29,7 +29,9 @@
     "fetch-issues-incremental": "tsx scripts/fetch-all-issues.ts --incremental",
     "fetch-discord": "tsx scripts/fetch-discord-messages.ts",
     "fetch-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
-    "validate-linear": "tsx scripts/validate-linear-setup.ts"
+    "validate-linear": "tsx scripts/validate-linear-setup.ts",
+    "briefing": "tsx scripts/briefing.ts",
+    "save-session": "tsx scripts/save-session.ts"
   },
   "keywords": [
     "mcp",

@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "sessionEnd": [
+      {
+        "command": "./scripts/save-session.sh"
+      }
+    ]
+  }
+}

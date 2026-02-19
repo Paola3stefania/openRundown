@@ -22,29 +22,29 @@ sudo systemctl start postgresql
 
 **Docker:**
 ```bash
-docker run --name unmute-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=unmute -p 5432:5432 -d postgres:14
+docker run --name openrundown-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=openrundown -p 5432:5432 -d postgres:14
 ```
 
 ### 2. Create Database
 
 **macOS:**
 ```bash
-createdb unmute
+createdb openrundown
 ```
 
 **Linux:**
 ```bash
-psql -U postgres -c "CREATE DATABASE unmute;"
+psql -U postgres -c "CREATE DATABASE openrundown;"
 ```
 
 ### 3. Set Environment Variable
 
 Add to `.env`:
 ```env
-DATABASE_URL=postgresql://user@localhost:5432/unmute
+DATABASE_URL=postgresql://user@localhost:5432/openrundown
 ```
 
-**Note:** On macOS, no password needed. On Linux, use: `postgresql://postgres:password@localhost:5432/unmute`
+**Note:** On macOS, no password needed. On Linux, use: `postgresql://postgres:password@localhost:5432/openrundown`
 
 ### 4. Run Migrations
 

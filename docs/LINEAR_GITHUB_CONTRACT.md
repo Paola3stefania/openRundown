@@ -1,10 +1,10 @@
 # Linear ↔ GitHub Integration Contract
 
-This document defines the contract between UNMute and Linear's native GitHub integration for PR linking and issue lifecycle management.
+This document defines the contract between OpenRundown and Linear's native GitHub integration for PR linking and issue lifecycle management.
 
 ## Overview
 
-UNMute creates Linear issues with proper structure, but relies on Linear's built-in GitHub integration to handle PR linking and auto-closing. This avoids duplicate work and ensures alignment with Linear's behavior.
+OpenRundown creates Linear issues with proper structure, but relies on Linear's built-in GitHub integration to handle PR linking and auto-closing. This avoids duplicate work and ensures alignment with Linear's behavior.
 
 ## Linear Issue Structure
 
@@ -89,7 +89,7 @@ Linear's integration automatically closes Linear issues when:
 - This avoids "merged but not shipped" confusion
 - Final "Closed" state when version is deployed/announced
 
-## What UNMute Does
+## What OpenRundown Does
 
 ### Creates
 1. Linear Projects (one per feature)
@@ -112,7 +112,7 @@ Linear's integration automatically closes Linear issues when:
 
 ## Mapping and Tracking
 
-UNMute maintains an internal mapping:
+OpenRundown maintains an internal mapping:
 ```
 source_id → linear_issue_id
 ```
@@ -140,5 +140,5 @@ The mapping is stored in:
 - [ ] Repository connected in Linear settings
 - [ ] Auto-close on PR merge configured (recommended: "Released" state)
 - [ ] Projects created for each feature (or use team default)
-- [ ] Team ID configured in UNMute `.env` (`PM_TOOL_TEAM_ID`)
+- [ ] Team ID configured in OpenRundown `.env` (`PM_TOOL_TEAM_ID`)
 

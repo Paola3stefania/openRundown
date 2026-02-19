@@ -1,200 +1,169 @@
 # OpenRundown
 
-**Project context and session memory for AI agents.** OpenRundown distills signals from Discord, GitHub, and past agent sessions into structured briefings so agents never start blind.
+**Give your AI agents memory.** OpenRundown is an MCP server and Cursor plugin that gives every agent session a briefing -- active issues, recent decisions, and open items from past sessions -- so no agent ever starts blind.
 
-## What It Does
+## The Problem
 
-### Agent Briefing System
-- Generates compact **project context** (~300-500 tokens) at session start
-- Tracks **agent sessions** with decisions, files edited, and open items
-- Passes **open items** from one session to the next automatically
-- Scopes briefings dynamically based on what the agent is working on
+Every time you open a new Cursor chat, the agent starts from zero. It doesn't know what you worked on yesterday, what decisions were made, which issues are critical, or what the last agent left unfinished. You end up repeating context, re-explaining decisions, and watching agents redo work that was already done.
 
-### Understands Your Product
-- Scans your **entire codebase** via git blame to know who owns what
-- Parses your **documentation** to extract product features
-- Computes **semantic embeddings** for intelligent matching
+## How OpenRundown Solves It
 
-### Collects Feedback
-- Fetches **GitHub issues** with all comments
-- Fetches **Discord messages** from support channels
-- Tracks **Pull Requests** linked to issues
+OpenRundown sits between your project signals (GitHub, Discord, past sessions) and your AI agents. It compresses everything into a compact briefing (~300-500 tokens) that the agent reads at session start.
 
-### Organizes Everything
-- **Groups** related issues together (1 Linear ticket per problem, not per report)
-- **Matches** Discord threads to GitHub issues they're discussing
-- **Maps** issues to product features based on content
-- **Detects labels** (bug, security, regression, enhancement) using AI
-- **Removes duplicates** automatically
+```
+GitHub Issues + Discord Threads + Past Sessions
+                    |
+              [ OpenRundown ]
+                    |
+            Compact Briefing JSON
+                    |
+         Agent starts with full context
+```
 
-### Prioritizes Intelligently  
-- **Urgent**: Security issues, bugs, regressions
-- **High**: Many community reports (5+ threads)
-- **Medium**: Feature requests, enhancements
-- **Low**: Questions, documentation
+When the session ends, OpenRundown saves what happened -- decisions made, files edited, open items -- so the *next* agent picks up exactly where this one left off.
 
-### Assigns & Syncs
-- **Recommends assignees** based on code ownership percentages
-- **Auto-assigns** when engineer comments on issue or opens PR
-- **Sets "In Progress"** when PR is opened
-- **Sets "Done"** when PR is merged or issue is closed
-- **Adds PR links** to Linear descriptions
+## What Agents Get
 
-### Generates Fixes (AI-Powered)
-- **Investigates issues** - Gathers full context, triages bug vs config vs feature
-- **Learns from history** - Finds similar closed issues and their merged PRs
-- **Generates fixes** - AI creates fix based on context and similar fixes
-- **Opens draft PRs** - Creates properly formatted PRs following project conventions
-- **Updates Linear** - Adds PR link and status updates automatically
+At session start, the agent automatically receives:
 
-### Exports to Linear
-- Creates issues with rich descriptions (GitHub link, Discord threads, PRs)
-- Organizes into **projects** matching your features
-- Formats titles with **last activity** ("3 days ago - Issue title")
-- Keeps everything in sync incrementally
+- **Active issues** ranked by priority (security, bugs, regressions first)
+- **Recent decisions** from merged PRs and past sessions
+- **Open items** the last agent left unfinished
+- **User signals** -- recurring themes from Discord and GitHub
+- **Codebase notes** -- which files map to which features
 
-One command does it all:
+This all fits in ~300-500 tokens. No vector search needed at query time.
+
+## Install
+
+### As a Cursor Plugin
+
+OpenRundown ships as a Cursor plugin with rules, skills, hooks, and an MCP server bundled together. The plugin auto-briefs agents at session start and auto-saves sessions on end.
+
+```
+.cursor-plugin/plugin.json   -- plugin manifest
+mcp.json                      -- MCP server config
+rules/openrundown.mdc         -- session protocol (always applied)
+skills/openrundown/SKILL.md   -- detailed agent instructions
+hooks/hooks.json              -- sessionEnd hook
+agents/session-tracker.md     -- session tracking agent
+```
+
+### Manual Setup
+
+1. Clone and install:
+   ```bash
+   git clone https://github.com/Paola3stefania/openRundown.git
+   cd openRundown
+   npm install && npm run build
+   ```
+
+2. Configure: Copy `env.example` to `.env` and set your tokens:
+   ```bash
+   cp env.example .env
+   ```
+   Required: `DISCORD_TOKEN`, `GITHUB_TOKEN`, `GITHUB_REPO_URL`
+   Optional: `OPENAI_API_KEY`, `DATABASE_URL`, `PM_TOOL_*`
+
+3. Database (optional, for persistent storage):
+   ```bash
+   createdb openrundown && npx prisma migrate deploy
+   ```
+
+4. Add to Cursor: See `cursor-mcp-config.json.example` for MCP configuration.
+
+## Agent Briefing Tools
+
+These are the core tools agents use every session:
+
+| Tool | What it does |
+|------|-------------|
+| `get_agent_briefing` | Get project context at session start |
+| `start_agent_session` | Begin tracking a work session |
+| `update_agent_session` | Record progress mid-session |
+| `end_agent_session` | Save decisions, files, open items |
+| `get_session_history` | See what previous agents did |
+
+### CLI
+
 ```bash
-sync_classify_and_export
+npm run briefing                    # See what agents see
+npm run briefing -- --json          # Machine-readable output
+npm run briefing -- --scope auth    # Scoped to a specific area
 ```
 
----
+## Signal Pipeline
 
-## Setup
+OpenRundown's briefings are powered by a signal pipeline that ingests, classifies, and compresses project data. You can use the pipeline tools directly or let the complete workflow handle everything:
 
-1. Install: `npm install && npm run build`
-2. Configure: Copy `env.example` to `.env` and set:
-   - `DISCORD_TOKEN` (required)
-   - `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_TOKEN` (required)
-   - `OPENAI_API_KEY` (optional, for semantic classification)
-   - `DATABASE_URL` (optional, for PostgreSQL storage)
-   - `PM_TOOL_*` (optional, for Linear/Jira export)
-   - `LOCAL_REPO_PATH` (optional, for code ownership and PR fix tools)
-3. Database (optional): `createdb openrundown && npx prisma migrate deploy`
-
-See `cursor-mcp-config.json.example` for MCP configuration.
-
-## Quick Start
-
-**Recommended: Use the complete workflow:**
 ```bash
-sync_classify_and_export  # Does everything: fetch -> embed -> group -> label -> match -> export -> sync
+sync_classify_and_export   # Runs the full pipeline end to end
 ```
 
-This single tool runs the complete workflow:
-1. Fetch GitHub issues
-2. Check Discord messages
-3. Compute all embeddings (issues, threads, features, groups)
-4. Group related issues
-5. Match Discord threads to issues
-6. Label issues
-7. Match to features (ungrouped issues, grouped issues, and groups)
-8. Export to Linear
-9. Sync Linear status
-10. Sync PR-based status
+### What the pipeline does
 
-## All Tools
+1. **Ingests** GitHub issues, Discord messages, and pull requests
+2. **Computes embeddings** for semantic matching across all sources
+3. **Groups** related issues (1 ticket per problem, not per report)
+4. **Matches** Discord threads to the GitHub issues they're discussing
+5. **Labels** issues (bug, security, regression, enhancement) using AI
+6. **Maps** everything to product features extracted from your docs
+7. **Prioritizes** by severity, community report count, and recency
+8. **Exports** to Linear with rich descriptions and auto-assignment
+9. **Syncs** status bidirectionally (PRs -> In Progress, merged -> Done)
 
-### Complete Workflow
-- `sync_classify_and_export` - **Complete workflow** (recommended): Fetch, compute embeddings, group, label, match features, export, sync status
+### AI-Powered Fixes
 
-### Agent Briefing
-- `get_agent_briefing` - Get project context briefing for the current session
-- `start_agent_session` - Start tracking an agent work session
-- `update_agent_session` - Record mid-session progress
-- `end_agent_session` - End session with decisions, files edited, open items
-- `get_session_history` - Get recent session history
+OpenRundown can investigate issues, learn from your merged PRs, generate fixes, and open draft PRs:
 
-### Data Fetching
-- `fetch_github_issues` - Fetch and cache GitHub issues (incremental)
-- `fetch_discord_messages` - Fetch and cache Discord messages (incremental)
-
-### Discovery
-- `list_servers` - List Discord servers
-- `list_channels` - List Discord channels
-- `list_linear_teams` - List Linear teams
-- `read_messages` - Read messages from a channel
-- `search_messages` - Search Discord messages
-- `search_github_issues` - Search GitHub issues
-- `search_discord_and_github` - Search both Discord and GitHub
-
-### Grouping & Classification
-- `group_github_issues` - Group related GitHub issues (issue-centric)
-- `suggest_grouping` - Group Discord threads by matched issues (thread-centric)
-- `classify_discord_messages` - Classify Discord messages with GitHub issues
-
-### Feature Matching
-- `match_issues_to_features` - Match GitHub issues to product features
-- `match_ungrouped_issues_to_features` - Match ungrouped issues to features
-- `match_database_groups_to_features` - Match groups to features (issue-centric)
-- `match_groups_to_features` - Match groups to features (thread-centric, JSON-based)
-
-### Thread/Issue Matching
-- `match_issues_to_threads` - Match GitHub issues to Discord threads
-
-### Labeling
-- `label_github_issues` - Detect and assign labels to GitHub issues (bug, security, etc.)
-- `label_linear_issues` - Add labels to Linear issues
-
-### Embeddings
-- `compute_discord_embeddings` - Compute Discord thread embeddings
-- `compute_github_issue_embeddings` - Compute GitHub issue embeddings
-- `compute_feature_embeddings` - Compute feature embeddings (with code context)
-- `compute_group_embeddings` - Compute group embeddings
-
-### Code Indexing
-- `index_codebase` - Index code for a specific query
-- `index_code_for_features` - Index code for all features
-
-### Code Ownership
-- `analyze_code_ownership` - Analyze git blame to determine code ownership by engineer
-- `view_feature_ownership` - View feature ownership table (who owns what % of each feature)
-
-### Documentation
-- `manage_documentation_cache` - Manage documentation cache (fetch, extract features, compute embeddings, list, clear)
-
-### Export & Sync
-- `export_to_pm_tool` - Export to Linear/Jira (use `update_descriptions=true` to add recommended assignees based on code ownership)
-- `sync_linear_status` - Sync GitHub -> Linear (closed/merged -> Done)
-- `sync_pr_based_status` - Sync PRs -> Linear (open PRs -> In Progress with assignee)
-- `sync_combined` - Combined sync (PR sync + status sync)
-
-### Linear Management
-- `classify_linear_issues` - Classify Linear issues into projects/features
-
-### Validation & Stats
-- `validate_pm_setup` - Validate PM tool configuration
-- `validate_export_sync` - Compare DB export tracking with Linear issues
-- `export_stats` - View comprehensive statistics
-- `check_github_issues_completeness` - Verify all issues fetched
-- `check_discord_classification_completeness` - Verify all messages classified
-
-### PR Fix Tools (AI-Powered)
-- `fix_github_issue` - **Full workflow**: Investigate issue -> AI generates fix -> Open draft PR
-- `seed_pr_learnings` - One-time: Populate learning DB with historical closed issues + merged PRs
-- `learn_from_pr` - Learn from a specific merged PR
-- `investigate_issue` - Gather issue context, triage, find similar historical fixes
-- `open_pr_with_fix` - Create branch, commit changes, push, open draft PR
-
-**Workflow:**
-```
-# One-time setup: Seed the learning database
-seed_pr_learnings()
-
-# For each issue you want to fix:
-# Step 1: Investigate (returns context for AI to generate fix)
-fix_github_issue(issue_number: 1234)
-
-# Step 2: AI generates fix based on context, then apply it
-fix_github_issue(issue_number: 1234, fix: { file_changes: [...], ... })
+```bash
+fix_github_issue(issue_number: 1234)   # Investigate + generate fix + open PR
 ```
 
 See [PR Fix Tool Documentation](docs/OPEN_PR_WITH_FIX_TOOL.md) for details.
+
+## Architecture
+
+```
+src/
+  briefing/        -- Distillation layer (the core: compresses signals into briefings)
+  mcp/             -- MCP server (40+ tools exposed to agents)
+  export/          -- Linear/Jira export and sync
+  config/          -- Project auto-detection and configuration
+  storage/         -- Prisma database layer
+
+hooks/             -- Cursor lifecycle hooks (sessionEnd)
+rules/             -- Cursor rules (session protocol)
+skills/            -- Cursor skills (agent instructions)
+agents/            -- Cursor agent definitions
+scripts/           -- CLI tools (briefing, save-session, setup)
+api/               -- Vercel serverless API endpoints
+```
+
+## How It Works Across Sessions
+
+```
+Session 1: Agent works on auth refactor
+  -> end_agent_session records: "Split auth into middleware, 3 files edited, 
+     open item: add tests for new middleware"
+
+Session 2: New agent opens fresh chat
+  -> get_agent_briefing returns the open item automatically
+  -> Agent says: "I see the last session split auth into middleware 
+     but tests weren't added yet. Want me to pick that up?"
+```
+
+No manual context passing. No copy-pasting. The rundown just flows.
 
 ## Documentation
 
 - [Environment Variables](docs/ENVIRONMENT_VARIABLES.md)
 - [Database Setup](docs/DATABASE_SETUP.md)
 - [GitHub Integration](docs/GITHUB_INTEGRATION.md)
-- [Linear Setup](docs/LINEAR_TEAM_SETUP.md)
-- [PR Fix Tool](docs/OPEN_PR_WITH_FIX_TOOL.md) - AI-powered fix generation
+- [Linear Team Setup](docs/LINEAR_TEAM_SETUP.md)
+- [Vercel Deployment](docs/VERCEL_DEPLOYMENT.md)
+- [PR Fix Tool](docs/OPEN_PR_WITH_FIX_TOOL.md)
+
+## License
+
+MIT

@@ -1,12 +1,12 @@
 # Vercel Deployment Guide
 
-This guide explains how to deploy UNMute to Vercel with automated daily syncing.
+This guide explains how to deploy OpenRundown to Vercel with automated daily syncing.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         UNMute                                   │
+│                         OpenRundown                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐     ┌─────────────────────────────────┐        │
 │  │   MCP       │     │      HTTP API (Vercel)          │        │
@@ -69,7 +69,7 @@ Add these to your `.env` file locally and in Vercel Dashboard:
 # Required
 DATABASE_URL=postgresql://...
 CRON_SECRET=<generated secret>
-UNMUTE_API_KEY=<generated secret>
+OPENRUNDOWN_API_KEY=<generated secret>
 
 # Discord
 DISCORD_TOKEN=<your bot token>
@@ -127,7 +127,7 @@ GET/POST /api/cron/daily-sync
 POST /api/tools/tool
 ```
 
-- **Authentication**: `Authorization: Bearer <UNMUTE_API_KEY>` or `x-api-key: <UNMUTE_API_KEY>`
+- **Authentication**: `Authorization: Bearer <OPENRUNDOWN_API_KEY>` or `x-api-key: <OPENRUNDOWN_API_KEY>`
 - **Body**:
   ```json
   {
@@ -138,7 +138,7 @@ POST /api/tools/tool
 - **Example**:
   ```bash
   curl -X POST https://your-app.vercel.app/api/tools/tool \
-    -H "Authorization: Bearer $UNMUTE_API_KEY" \
+    -H "Authorization: Bearer $OPENRUNDOWN_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{"tool": "group_github_issues", "args": {"min_similarity": 80}}'
   ```
@@ -150,7 +150,7 @@ POST /api/tools/tool
 POST /api/tools/sync
 ```
 
-- **Authentication**: `Authorization: Bearer <UNMUTE_API_KEY>` or `x-api-key: <UNMUTE_API_KEY>`
+- **Authentication**: `Authorization: Bearer <OPENRUNDOWN_API_KEY>` or `x-api-key: <OPENRUNDOWN_API_KEY>`
 - **Body** (optional):
   ```json
   {
@@ -244,7 +244,7 @@ The local MCP server provides the full interactive experience with all tools:
 ```json
 {
   "mcpServers": {
-    "unmute": {
+    "openrundown": {
       "command": "node",
       "args": ["/path/to/openrundown/dist/index.js"],
       "env": {
@@ -297,7 +297,7 @@ All endpoints log to console, which appears in Vercel logs:
 
 ### API Key Invalid
 
-1. Verify `UNMUTE_API_KEY` is set in environment variables
+1. Verify `OPENRUNDOWN_API_KEY` is set in environment variables
 2. Check the key matches what you're sending in the request
 3. Ensure you're using the correct header format
 
@@ -316,7 +316,7 @@ All endpoints log to console, which appears in Vercel logs:
 ## Security Notes
 
 1. **Never expose `CRON_SECRET`** - it's for Vercel internal use only
-2. **Keep `UNMUTE_API_KEY` secret** - treat it like a password
+2. **Keep `OPENRUNDOWN_API_KEY` secret** - treat it like a password
 3. **Rotate keys periodically** - generate new secrets if compromised
 4. **Use HTTPS only** - Vercel enforces this by default
 
