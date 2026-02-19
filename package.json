@@ -31,7 +31,8 @@
     "fetch-discord-incremental": "tsx scripts/fetch-discord-messages.ts --incremental",
     "validate-linear": "tsx scripts/validate-linear-setup.ts",
     "briefing": "tsx scripts/briefing.ts",
-    "save-session": "tsx scripts/save-session.ts"
+    "save-session": "tsx scripts/save-session.ts",
+    "setup": "tsx scripts/setup.ts"
   },
   "keywords": [
     "mcp",
