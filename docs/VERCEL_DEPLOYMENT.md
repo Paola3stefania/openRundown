@@ -246,7 +246,7 @@ The local MCP server provides the full interactive experience with all tools:
   "mcpServers": {
     "unmute": {
       "command": "node",
-      "args": ["/path/to/discord-mcp/dist/index.js"],
+      "args": ["/path/to/openrundown/dist/index.js"],
       "env": {
         "DISCORD_TOKEN": "${DISCORD_TOKEN}",
         "DATABASE_URL": "${DATABASE_URL}",

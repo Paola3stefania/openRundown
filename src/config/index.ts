@@ -1,5 +1,5 @@
 /**
- * Configuration for UNMute MCP Server
+ * Configuration for OpenRundown MCP Server
  * 
  * Set these via environment variables or update the defaults below.
  */

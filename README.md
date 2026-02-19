@@ -1,8 +1,14 @@
-# UNMute
+# OpenRundown
 
-**Your AI Product Manager.** UNMute automatically triages community feedback so you can focus on building.
+**Project context and session memory for AI agents.** OpenRundown distills signals from Discord, GitHub, and past agent sessions into structured briefings so agents never start blind.
 
 ## What It Does
+
+### Agent Briefing System
+- Generates compact **project context** (~300-500 tokens) at session start
+- Tracks **agent sessions** with decisions, files edited, and open items
+- Passes **open items** from one session to the next automatically
+- Scopes briefings dynamically based on what the agent is working on
 
 ### Understands Your Product
 - Scans your **entire codebase** via git blame to know who owns what
@@ -34,7 +40,7 @@
 - **Sets "Done"** when PR is merged or issue is closed
 - **Adds PR links** to Linear descriptions
 
-### Generates Fixes (NEW)
+### Generates Fixes (AI-Powered)
 - **Investigates issues** - Gathers full context, triages bug vs config vs feature
 - **Learns from history** - Finds similar closed issues and their merged PRs
 - **Generates fixes** - AI creates fix based on context and similar fixes
@@ -64,7 +70,7 @@ sync_classify_and_export
    - `DATABASE_URL` (optional, for PostgreSQL storage)
    - `PM_TOOL_*` (optional, for Linear/Jira export)
    - `LOCAL_REPO_PATH` (optional, for code ownership and PR fix tools)
-3. Database (optional): `createdb unmute_mcp && npx prisma migrate deploy`
+3. Database (optional): `createdb openrundown && npx prisma migrate deploy`
 
 See `cursor-mcp-config.json.example` for MCP configuration.
 
@@ -72,7 +78,7 @@ See `cursor-mcp-config.json.example` for MCP configuration.
 
 **Recommended: Use the complete workflow:**
 ```bash
-sync_classify_and_export  # Does everything: fetch → embed → group → label → match → export → sync
+sync_classify_and_export  # Does everything: fetch -> embed -> group -> label -> match -> export -> sync
 ```
 
 This single tool runs the complete workflow:
@@ -91,6 +97,13 @@ This single tool runs the complete workflow:
 
 ### Complete Workflow
 - `sync_classify_and_export` - **Complete workflow** (recommended): Fetch, compute embeddings, group, label, match features, export, sync status
+
+### Agent Briefing
+- `get_agent_briefing` - Get project context briefing for the current session
+- `start_agent_session` - Start tracking an agent work session
+- `update_agent_session` - Record mid-session progress
+- `end_agent_session` - End session with decisions, files edited, open items
+- `get_session_history` - Get recent session history
 
 ### Data Fetching
 - `fetch_github_issues` - Fetch and cache GitHub issues (incremental)
@@ -142,8 +155,8 @@ This single tool runs the complete workflow:
 
 ### Export & Sync
 - `export_to_pm_tool` - Export to Linear/Jira (use `update_descriptions=true` to add recommended assignees based on code ownership)
-- `sync_linear_status` - Sync GitHub → Linear (closed/merged → Done)
-- `sync_pr_based_status` - Sync PRs → Linear (open PRs → In Progress with assignee)
+- `sync_linear_status` - Sync GitHub -> Linear (closed/merged -> Done)
+- `sync_pr_based_status` - Sync PRs -> Linear (open PRs -> In Progress with assignee)
 - `sync_combined` - Combined sync (PR sync + status sync)
 
 ### Linear Management
@@ -157,7 +170,7 @@ This single tool runs the complete workflow:
 - `check_discord_classification_completeness` - Verify all messages classified
 
 ### PR Fix Tools (AI-Powered)
-- `fix_github_issue` - **Full workflow**: Investigate issue → AI generates fix → Open draft PR
+- `fix_github_issue` - **Full workflow**: Investigate issue -> AI generates fix -> Open draft PR
 - `seed_pr_learnings` - One-time: Populate learning DB with historical closed issues + merged PRs
 - `learn_from_pr` - Learn from a specific merged PR
 - `investigate_issue` - Gather issue context, triage, find similar historical fixes

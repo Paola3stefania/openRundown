@@ -1,11 +1,11 @@
 {
-  "name": "unmute-mcp",
+  "name": "openrundown",
   "version": "1.0.0",
-  "description": "MCP server for reading Discord messages and classifying them against GitHub issues",
+  "description": "Project context and session memory for AI agents. Distills Discord, GitHub, and session signals into compact briefings.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "unmute-mcp": "./dist/index.js"
+    "openrundown": "./dist/index.js"
   },
   "scripts": {
     "build": "prisma generate && prisma migrate deploy && tsc",
@@ -33,7 +33,7 @@
   },
   "keywords": [
     "mcp",
-    "unmute",
+    "openrundown",
     "claude",
     "vercel"
   ],

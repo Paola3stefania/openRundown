@@ -88,11 +88,11 @@ OPENAI_API_KEY=your_openai_api_key_here
 # Database Configuration (for PostgreSQL)
 # If DATABASE_URL is set, PostgreSQL will be used automatically
 # Otherwise, JSON files will be used
-DATABASE_URL=postgresql://user:password@localhost:5432/unmute_mcp
+DATABASE_URL=postgresql://user:password@localhost:5432/openrundown
 # OR use individual variables:
 # DB_HOST=localhost
 # DB_PORT=5432
-# DB_NAME=unmute_mcp
+# DB_NAME=openrundown
 # DB_USER=your_user
 # DB_PASSWORD=your_password
 # USE_SEMANTIC_CLASSIFICATION=false  # Uncomment to disable semantic classification

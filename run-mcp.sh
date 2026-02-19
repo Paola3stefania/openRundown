@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set the project directory
-PROJECT_DIR="/Users/user/Projects/discord-mcp"
+PROJECT_DIR="/Users/user/Projects/openrundown"
 
 # Change to the project directory
 cd "$PROJECT_DIR" || {

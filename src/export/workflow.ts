@@ -76,13 +76,12 @@ export async function runExportWorkflow(
     }
 
     // Step 1a: Validate Linear team (if using Linear)
-    // Auto-create UNMute team if not configured
+    // Auto-create OpenRundown team if not configured
     if (pmToolConfig.type === "linear") {
       const pmTool = createPMTool(pmToolConfig);
       const linearTool = pmTool as import("./base.js").LinearPMTool;
       if (linearTool.validateTeam) {
-        // Create UNMute team if no team_id is configured
-        await linearTool.validateTeam(true, "UNMute");
+        await linearTool.validateTeam(true, "OpenRundown");
         // Update team_id if it was auto-created
         if (linearTool.teamId && !pmToolConfig.team_id) {
           pmToolConfig.team_id = linearTool.teamId;

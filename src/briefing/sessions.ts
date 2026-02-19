@@ -4,15 +4,24 @@
  * Lightweight bookkeeping for agent sessions. Tracks what an agent worked on
  * so the next briefing can highlight what changed since the last session.
  *
+ * All sessions are scoped to a projectId so multiple projects can share
+ * one database without collision.
+ *
  * No embeddings needed — just structured data in a simple table.
  */
 
 import { prisma } from "../storage/db/prisma.js";
+import { detectProjectId } from "../config/project.js";
 import type { AgentSession } from "./types.js";
 
-export async function startSession(scope: string[] = []): Promise<AgentSession> {
+export async function startSession(
+  scope: string[] = [],
+  projectId?: string,
+): Promise<AgentSession> {
+  const pid = projectId ?? detectProjectId();
   const session = await prisma.agentSession.create({
     data: {
+      projectId: pid,
       scope,
       startedAt: new Date(),
     },
@@ -90,16 +99,23 @@ export async function getSession(sessionId: string): Promise<AgentSession | null
   return session ? mapSession(session) : null;
 }
 
-export async function getRecentSessions(limit = 5): Promise<AgentSession[]> {
+export async function getRecentSessions(
+  limit = 5,
+  projectId?: string,
+): Promise<AgentSession[]> {
+  const pid = projectId ?? detectProjectId();
   const sessions = await prisma.agentSession.findMany({
+    where: { projectId: pid },
     orderBy: { startedAt: "desc" },
     take: limit,
   });
   return sessions.map(mapSession);
 }
 
-export async function getLastSession(): Promise<AgentSession | null> {
+export async function getLastSession(projectId?: string): Promise<AgentSession | null> {
+  const pid = projectId ?? detectProjectId();
   const session = await prisma.agentSession.findFirst({
+    where: { projectId: pid },
     orderBy: { startedAt: "desc" },
   });
   return session ? mapSession(session) : null;
@@ -107,6 +123,7 @@ export async function getLastSession(): Promise<AgentSession | null> {
 
 function mapSession(session: {
   id: string;
+  projectId: string;
   startedAt: Date;
   endedAt: Date | null;
   scope: string[];
@@ -119,6 +136,7 @@ function mapSession(session: {
 }): AgentSession {
   return {
     sessionId: session.id,
+    projectId: session.projectId,
     startedAt: session.startedAt.toISOString(),
     endedAt: session.endedAt?.toISOString(),
     scope: session.scope,

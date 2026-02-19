@@ -1,7 +1,7 @@
 /**
  * Distillation Layer
  *
- * Compresses UNMute's rich data (issues, groups, threads, signals, features)
+ * Compresses OpenRundown's rich data (issues, groups, threads, signals, features)
  * into a compact `project.context` JSON payload (~300-500 tokens) that an
  * agent can consume at session start.
  *
@@ -9,6 +9,7 @@
  */
 
 import { prisma } from "../storage/db/prisma.js";
+import { detectProjectId } from "../config/project.js";
 import type {
   ProjectContext,
   ActiveIssue,
@@ -31,6 +32,7 @@ export async function distillBriefing(options: BriefingOptions = {}): Promise<Pr
     : new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
   const scope = options.scope?.toLowerCase();
+  const projectId = options.project ?? detectProjectId();
 
   const [
     activeIssues,
@@ -39,19 +41,17 @@ export async function distillBriefing(options: BriefingOptions = {}): Promise<Pr
     decisions,
     recentActivity,
     preferences,
-    projectName,
   ] = await Promise.all([
     distillActiveIssues(since, scope),
     distillUserSignals(since, scope),
     distillCodebaseNotes(scope),
     distillDecisions(since, scope),
     distillRecentActivity(since),
-    loadPreferences(),
-    getProjectName(),
+    loadPreferences(projectId),
   ]);
 
   return {
-    project: projectName,
+    project: projectId,
     focus: scope,
     lastUpdated: new Date().toISOString(),
     decisions,
@@ -293,10 +293,9 @@ async function distillRecentActivity(since: Date): Promise<RecentActivity> {
   };
 }
 
-async function loadPreferences(): Promise<Record<string, string>> {
-  // Preferences are loaded from the last session if available,
-  // otherwise return sensible defaults that can be overridden
+async function loadPreferences(projectId: string): Promise<Record<string, string>> {
   const lastSession = await prisma.agentSession.findFirst({
+    where: { projectId },
     orderBy: { startedAt: "desc" },
     select: { scope: true },
   });
@@ -304,13 +303,6 @@ async function loadPreferences(): Promise<Record<string, string>> {
   return {
     lastScope: lastSession?.scope?.join(", ") ?? "none",
   };
-}
-
-async function getProjectName(): Promise<string> {
-  const config = await import("../config/index.js");
-  const cfg = config.getConfig();
-  if (cfg.github?.repo) return cfg.github.repo;
-  return "unmute-project";
 }
 
 function getReactionCount(reactions: unknown): number {

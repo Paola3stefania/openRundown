@@ -49,6 +49,7 @@ import type { Signal } from "../types/signal.js";
 import { fetchMultipleDocumentation } from "../export/documentationFetcher.js";
 import { extractFeaturesFromDocumentation } from "../export/featureExtractor.js";
 import type { ClassifiedThread, Group, UngroupedThread } from "../storage/types.js";
+import { detectProjectId } from "../config/project.js";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
@@ -1321,7 +1322,7 @@ const tools: Tool[] = [
   // ========================================================================
   {
     name: "get_agent_briefing",
-    description: "Get a structured project context briefing optimized for agent consumption. Returns a compact JSON payload (~300-500 tokens) with active issues, user signals, recent decisions, codebase notes, and activity metrics. Call this at the start of a session to understand the current project state. Optionally scope to a specific area (e.g., 'auth', 'billing') for a focused briefing.",
+    description: "Get a structured project context briefing optimized for agent consumption. Returns a compact JSON payload (~300-500 tokens) with active issues, user signals, recent decisions, codebase notes, and activity metrics. Call this at the start of a session to understand the current project state. Automatically scoped to the current project (auto-detected from git remote or folder name). Pass 'project' to request a briefing for a different project.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1333,13 +1334,17 @@ const tools: Tool[] = [
           type: "string",
           description: "Optional ISO timestamp to look back from. Defaults to last 14 days. Use the timestamp from a previous session to see only what changed.",
         },
+        project: {
+          type: "string",
+          description: "Optional project identifier (e.g., 'owner/repo') to get a briefing for a different project. Defaults to the auto-detected current project.",
+        },
       },
       required: [],
     },
   },
   {
     name: "start_agent_session",
-    description: "Start a new agent session for tracking purposes. Returns a session ID that should be passed to end_agent_session when the session completes. This allows the briefing system to track what agents work on across sessions.",
+    description: "Start a new agent session for tracking purposes. Returns a session ID that should be passed to end_agent_session when the session completes. Sessions are automatically tagged with the current project.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1347,6 +1352,10 @@ const tools: Tool[] = [
           type: "array",
           items: { type: "string" },
           description: "Areas the agent plans to work on (e.g., ['agent-auth', 'mcp-tools.ts']).",
+        },
+        project: {
+          type: "string",
+          description: "Optional project identifier override. Defaults to the auto-detected current project.",
         },
       },
       required: [],
@@ -1445,7 +1454,7 @@ const tools: Tool[] = [
   },
   {
     name: "get_session_history",
-    description: "Get recent agent session history. Shows what agents worked on in past sessions, including files edited, decisions made, and open items. Useful for understanding recent context and picking up where the last session left off.",
+    description: "Get recent agent session history for the current project. Shows what agents worked on in past sessions, including files edited, decisions made, and open items. Useful for understanding recent context and picking up where the last session left off.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1455,7 +1464,11 @@ const tools: Tool[] = [
         },
         session_id: {
           type: "string",
-          description: "Optional specific session ID to retrieve.",
+          description: "Optional specific session ID to retrieve (ignores project filter).",
+        },
+        project: {
+          type: "string",
+          description: "Optional project identifier to filter sessions. Defaults to the auto-detected current project.",
         },
       },
       required: [],
@@ -11867,11 +11880,13 @@ Example output:
 
         const scope = args?.scope as string | undefined;
         const since = args?.since as string | undefined;
+        const project = args?.project as string | undefined;
+        const projectId = project ?? detectProjectId();
 
-        console.error(`[Briefing] Generating agent briefing${scope ? ` (scope: ${scope})` : ""}...`);
+        console.error(`[Briefing] Generating agent briefing for project "${projectId}"${scope ? ` (scope: ${scope})` : ""}...`);
 
-        const briefing = await distillBriefing({ scope, since });
-        const lastSession = await getLastSession();
+        const briefing = await distillBriefing({ scope, since, project: projectId });
+        const lastSession = await getLastSession(projectId);
 
         const result = {
           briefing,
@@ -11911,9 +11926,11 @@ Example output:
 
         const { startSession } = await import("../briefing/sessions.js");
         const scope = (args?.scope as string[] | undefined) ?? [];
+        const project = args?.project as string | undefined;
+        const projectId = project ?? detectProjectId();
 
-        console.error(`[Session] Starting new agent session (scope: ${scope.join(", ") || "none"})...`);
-        const session = await startSession(scope);
+        console.error(`[Session] Starting new agent session for project "${projectId}" (scope: ${scope.join(", ") || "none"})...`);
+        const session = await startSession(scope, projectId);
         console.error(`[Session] Started session: ${session.sessionId}`);
 
         return {
@@ -12013,6 +12030,8 @@ Example output:
         const { getRecentSessions, getSession } = await import("../briefing/sessions.js");
         const sessionId = args?.session_id as string | undefined;
         const limit = (args?.limit as number | undefined) ?? 5;
+        const project = args?.project as string | undefined;
+        const projectId = project ?? detectProjectId();
 
         if (sessionId) {
           console.error(`[Session] Fetching session: ${sessionId}...`);
@@ -12028,8 +12047,8 @@ Example output:
           };
         }
 
-        console.error(`[Session] Fetching last ${limit} sessions...`);
-        const sessions = await getRecentSessions(limit);
+        console.error(`[Session] Fetching last ${limit} sessions for project "${projectId}"...`);
+        const sessions = await getRecentSessions(limit, projectId);
         console.error(`[Session] Found ${sessions.length} sessions`);
 
         return {
@@ -12069,6 +12088,9 @@ Example output:
 
 // Start the server
 async function main() {
+  const projectId = detectProjectId();
+  console.error(`[OpenRundown] Project: ${projectId}`);
+
   // Start MCP server FIRST so Cursor can communicate with it
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);

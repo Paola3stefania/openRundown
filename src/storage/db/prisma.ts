@@ -1,5 +1,5 @@
 /**
- * Prisma client singleton for UNMute MCP
+ * Prisma client singleton for OpenRundown
  * Provides type-safe database access
  */
 

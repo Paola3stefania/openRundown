@@ -62,6 +62,7 @@ export interface RecentActivity {
 
 export interface AgentSession {
   sessionId: string;
+  projectId: string;
   startedAt: string;
   endedAt?: string;
   scope: string[];
@@ -76,5 +77,6 @@ export interface AgentSession {
 export interface BriefingOptions {
   scope?: string;
   since?: string;
+  project?: string;
   maxTokens?: number;
 }

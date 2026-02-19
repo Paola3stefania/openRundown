@@ -1,4 +1,4 @@
-// Prisma schema for UNMute MCP Database
+// Prisma schema for OpenRundown Database
 // Generated from existing migrations
 
 generator client {
@@ -750,6 +750,7 @@ model FixAttempt {
 
 model AgentSession {
   id                String   @id @default(uuid())
+  projectId         String   @default("default") @map("project_id")
   startedAt         DateTime @default(now()) @map("started_at")
   endedAt           DateTime? @map("ended_at")
   scope             String[] @default([])
@@ -762,6 +763,7 @@ model AgentSession {
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  @@index([projectId, startedAt(sort: Desc)])
   @@index([startedAt(sort: Desc)])
   @@index([scope], type: Gin)
   @@map("agent_sessions")

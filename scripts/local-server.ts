@@ -10,7 +10,7 @@ import http from "http";
 import { executeToolHandler, getAvailableTools, cleanupToolExecutor } from "../api/lib/tool-executor.js";
 
 const PORT = process.env.PORT || 4000;
-const API_KEY = process.env.UNMUTE_API_KEY || "test";
+const API_KEY = process.env.OPENRUNDOWN_API_KEY || process.env.UNMUTE_API_KEY || "test";
 
 function parseBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -190,7 +190,7 @@ Endpoints:
   POST /api/tools/export    - Run export_to_pm_tool
   GET  /api/tools/status    - Get statistics
 
-Auth: x-api-key: ${API_KEY === "test" ? "test (default)" : "<your UNMUTE_API_KEY>"}
+Auth: x-api-key: ${API_KEY === "test" ? "test (default)" : "<your OPENRUNDOWN_API_KEY>"}
 
 Example:
   curl http://localhost:${PORT}/api/tools/tool \\
