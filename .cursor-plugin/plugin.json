@@ -1,13 +1,22 @@
 {
   "name": "openrundown",
-  "displayName": "OpenRundown",
   "version": "0.1.0",
-  "description": "Project context and session memory for AI agents. Gives every session a briefing on active issues, recent decisions, and open items from past sessions.",
+  "description": "Persistent memory for AI agents. Briefs every session on active issues, recent decisions, and open items from past sessions so no agent starts blind.",
   "author": {
     "name": "Paola Estefania",
     "email": "paola@openrundown.dev"
   },
+  "homepage": "https://github.com/Paola3stefania/openrundown",
+  "repository": "https://github.com/Paola3stefania/openrundown",
   "license": "MIT",
-  "keywords": ["cursor", "mcp", "agent-memory", "session-context", "briefing", "openrundown"],
+  "keywords": [
+    "mcp",
+    "agent-memory",
+    "session-context",
+    "briefing",
+    "cursor",
+    "model-context-protocol",
+    "developer-tools"
+  ],
   "logo": "assets/logo.svg"
 }

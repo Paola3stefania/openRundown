@@ -46,7 +46,7 @@ OpenRundown ships as a Cursor plugin with rules, skills, hooks, and an MCP serve
 
 ```
 .cursor-plugin/plugin.json   -- plugin manifest
-mcp.json                      -- MCP server config
+.mcp.json                     -- MCP server config
 rules/openrundown.mdc        -- session protocol (always applied)
 skills/openrundown/SKILL.md  -- detailed agent instructions
 hooks/hooks.json              -- sessionEnd hook
