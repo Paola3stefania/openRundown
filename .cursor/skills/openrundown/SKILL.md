@@ -33,13 +33,21 @@ When doing meaningful work (not just answering questions):
 
 1. Call `start_agent_session` with the scope of work and `project`
    - Example: `scope: ["agent-auth", "mcp-tools"], project: "owner/repo"`
-2. Call `update_agent_session` periodically to record progress
+2. Call `update_agent_session` **immediately after each meaningful step** (see auto-save rules below)
 3. Call `end_agent_session` when done, recording:
    - `decisions_made`: key decisions with brief reasoning
    - `files_edited`: files that were changed
    - `open_items`: unfinished work the next agent should pick up
    - `issues_referenced`: GitHub issue numbers discussed
    - `summary`: 1-2 sentence description of what was accomplished
+
+## Auto-Save on Every Turn (mandatory)
+
+Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since you cannot detect when a chat is about to end, you must save at the end of every turn:
+
+1. **At the end of each response**, after all tool calls and edits are done, call `update_agent_session` with the current cumulative state: `files_edited`, `decisions_made`, `open_items`, and a `summary` of progress so far.
+2. This is the **only** required save point -- do not call `update_agent_session` after every individual action.
+3. `end_agent_session` is still preferred when you know the work is done, but the per-turn save ensures nothing is lost if the chat drops unexpectedly.
 
 ## What Makes a Good Session Record
 
