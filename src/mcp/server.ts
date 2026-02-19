@@ -121,10 +121,25 @@ async function findDiscordCacheFile(channelId: string): Promise<string | null> {
 // Create MCP server
 const mcpServer = new McpServer(
   {
-  name: "unmute-mcp",
+  name: "openrundown",
   version: "1.0.0",
   },
   {
+    instructions: [
+      "OpenRundown provides project context and session memory for AI agents.",
+      "",
+      "At the START of every conversation:",
+      "1. Call get_agent_briefing to understand the current project state (active issues, recent decisions, open items, user signals from Discord/GitHub)",
+      "2. Call get_session_history to see what previous agent sessions worked on and what open items remain",
+      "3. Use this context to inform your responses — avoid duplicating past work or revisiting resolved decisions",
+      "",
+      "During meaningful work sessions:",
+      "1. Call start_agent_session at the beginning with the scope of work (e.g., ['agent-auth', 'mcp-tools'])",
+      "2. Call update_agent_session periodically to record progress mid-session",
+      "3. Call end_agent_session when done, recording: decisions_made, files_edited, open_items, issues_referenced, and a summary",
+      "",
+      "This session data powers the next agent's briefing — what you record here is what the next agent will know.",
+    ].join("\n"),
     capabilities: {
       tools: {},
     },
