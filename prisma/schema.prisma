@@ -819,3 +819,34 @@ model PRLearning {
   @@index([prMergedAt(sort: Desc)])
   @@map("pr_learnings")
 }
+
+// Persistent conversation memory with semantic search
+model MemoryEntry {
+  id          String   @id @default(uuid())
+  projectId   String   @default("default") @map("project_id")
+  content     String   @db.Text
+  summary     String   @db.Text
+  tags        String[] @default([])
+  source      String   @default("conversation") // 'conversation' | 'manual'
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  embedding   MemoryEntryEmbedding?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([tags], type: Gin)
+  @@map("memory_entries")
+}
+
+model MemoryEntryEmbedding {
+  memoryId    String   @id @map("memory_id")
+  embedding   Json     @db.JsonB
+  contentHash String   @map("content_hash")
+  model       String
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  memory      MemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_entry_embeddings")
+}

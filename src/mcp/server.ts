@@ -1520,6 +1520,99 @@ const tools: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "save_memory",
+    description: "Save a memory entry (conversation insight, decision, learning) with semantic embedding for future retrieval. Use this to persist important things discussed so they can be recalled in future sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: "The full content to remember (can be a conversation snippet, decision, or learning).",
+        },
+        summary: {
+          type: "string",
+          description: "A short 1-2 sentence summary of what this memory is about.",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional tags to categorize the memory (e.g. ['ciba', 'architecture', 'decision']).",
+        },
+        project_id: {
+          type: "string",
+          description: "Project to scope the memory to. Defaults to the detected project.",
+        },
+      },
+      required: ["content", "summary"],
+    },
+  },
+  {
+    name: "search_memory",
+    description: "Search past memories semantically using embeddings. Returns the most relevant memories for a given query. Use at session start to recall relevant context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "What to search for (natural language query).",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of results to return (default: 5).",
+          default: 5,
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional: filter results by tags.",
+        },
+        project_id: {
+          type: "string",
+          description: "Project to search within. Defaults to the detected project.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_recent_memories",
+    description: "Get the most recent memory entries without a search query. Useful at session start to get a quick overview of recent context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "Number of recent memories to return (default: 10).",
+          default: 10,
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional: filter by tags.",
+        },
+        project_id: {
+          type: "string",
+          description: "Project to scope to. Defaults to the detected project.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "delete_memory",
+    description: "Delete a memory entry by its ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The memory entry ID to delete.",
+        },
+      },
+      required: ["id"],
+    },
+  },
 ];
 
 // Handle list tools request
@@ -1577,6 +1670,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "label_linear_issues",
     "audit_and_fix_incorrectly_assigned",
     "remove_linear_duplicates",
+    "save_memory",
+    "search_memory",
+    "get_recent_memories",
+    "delete_memory",
   ]);
 
   try {
@@ -12255,6 +12352,65 @@ Example output:
         logError("import_claude_plans failed:", error);
         throw new Error(`import_claude_plans failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+
+    case "save_memory": {
+      const { saveMemory } = await import("../storage/db/memory.js");
+      const entry = await saveMemory({
+        content: String(args?.content ?? ""),
+        summary: String(args?.summary ?? ""),
+        tags: Array.isArray(args?.tags) ? args.tags as string[] : [],
+        source: "conversation",
+        projectId: args?.project_id ? String(args.project_id) : undefined,
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ success: true, memory: entry }, null, 2),
+        }],
+      };
+    }
+
+    case "search_memory": {
+      const { searchMemory } = await import("../storage/db/memory.js");
+      const results = await searchMemory({
+        query: String(args?.query ?? ""),
+        limit: typeof args?.limit === "number" ? args.limit : 5,
+        tags: Array.isArray(args?.tags) ? args.tags as string[] : undefined,
+        projectId: args?.project_id ? String(args.project_id) : undefined,
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ results, count: results.length }, null, 2),
+        }],
+      };
+    }
+
+    case "get_recent_memories": {
+      const { getRecentMemories } = await import("../storage/db/memory.js");
+      const results = await getRecentMemories({
+        limit: typeof args?.limit === "number" ? args.limit : 10,
+        tags: Array.isArray(args?.tags) ? args.tags as string[] : undefined,
+        projectId: args?.project_id ? String(args.project_id) : undefined,
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ results, count: results.length }, null, 2),
+        }],
+      };
+    }
+
+    case "delete_memory": {
+      const { deleteMemory } = await import("../storage/db/memory.js");
+      const ok = await deleteMemory(String(args?.id ?? ""));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ success: ok }, null, 2),
+        }],
+      };
     }
 
     default:

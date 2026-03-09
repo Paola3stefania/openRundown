@@ -20,12 +20,14 @@ Every call to `get_agent_briefing`, `get_session_history`, and `start_agent_sess
 Always do this before responding to the user:
 
 1. Detect the project identifier (see above)
-2. Call `get_agent_briefing` from the `user-openrundown` MCP server with `project`
+2. Call `get_agent_briefing` from the `openrundown` MCP server with `project`
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
-4. Use the briefing to understand: active issues, recent decisions, open items, user signals
-5. If a previous session has `open_items`, proactively mention them
+4. Call `search_memory` with a query relevant to the current task to recall semantic memories
+5. Call `get_recent_memories` with `limit: 5` to surface anything recently saved
+6. Use all of the above to understand: active issues, recent decisions, open items, user signals, and past learnings
+7. If a previous session has `open_items`, proactively mention them
 
 ## During Work Sessions
 
@@ -40,6 +42,15 @@ When doing meaningful work (not just answering questions):
    - `open_items`: unfinished work the next agent should pick up
    - `issues_referenced`: GitHub issue numbers discussed
    - `summary`: 1-2 sentence description of what was accomplished
+
+## Saving Memories
+
+Save important things so future sessions can recall them:
+
+- After making an architectural decision, call `save_memory` with the decision and reasoning
+- After discovering something non-obvious about the codebase, save it
+- At end of session, save a summary of what was accomplished and what's next
+- Use specific `tags` (e.g. `["better-auth", "ciba", "decision"]`) for better filtering later
 
 ## What Makes a Good Session Record
 
@@ -56,3 +67,7 @@ When doing meaningful work (not just answering questions):
 | `start_agent_session` | Beginning of meaningful work |
 | `update_agent_session` | Mid-session progress recording |
 | `end_agent_session` | End of meaningful work |
+| `save_memory` | Save an insight, decision, or learning with embedding |
+| `search_memory` | Semantically search past memories |
+| `get_recent_memories` | List recent memories at session start |
+| `delete_memory` | Remove a memory by ID |
