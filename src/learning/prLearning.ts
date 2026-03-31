@@ -20,6 +20,7 @@ export interface SeedOptions {
   limit?: number;        // Max number of issues to process
   dryRun?: boolean;      // Show what would be seeded without storing
   batchSize?: number;    // Issues per batch (default: 50)
+  repo?: string;         // Repository in format 'owner/repo'. Defaults to config.
 }
 
 export interface SeedResult {
@@ -622,13 +623,23 @@ async function fetchPRReviews(
  * Seed the PRLearning table with historical closed issues and their merged PRs
  */
 export async function seedPRLearnings(options: SeedOptions = {}): Promise<SeedResult> {
-  const { since, limit, dryRun = false, batchSize = 50 } = options;
+  const { since, limit, dryRun = false, batchSize = 50, repo: repoParam } = options;
   const startTime = Date.now();
   
   const config = getConfig();
   const prisma = new PrismaClient();
-  const owner = config.github.owner;
-  const repo = config.github.repo;
+  let owner: string;
+  let repo: string;
+
+  if (repoParam) {
+    const parts = repoParam.split("/");
+    if (parts.length !== 2) throw new Error(`Invalid repo format: ${repoParam}. Expected owner/repo`);
+    owner = parts[0];
+    repo = parts[1];
+  } else {
+    owner = config.github.owner;
+    repo = config.github.repo;
+  }
   const issueRepo = `${owner}/${repo}`;
   
   const result: SeedResult = {
@@ -808,11 +819,21 @@ export async function seedPRLearnings(options: SeedOptions = {}): Promise<SeedRe
 /**
  * Learn from a single merged PR
  */
-export async function learnFromPR(prNumber: number, force: boolean = false): Promise<boolean> {
+export async function learnFromPR(prNumber: number, force: boolean = false, repoParam?: string): Promise<boolean> {
   const config = getConfig();
   const prisma = new PrismaClient();
-  const owner = config.github.owner;
-  const repo = config.github.repo;
+  let owner: string;
+  let repo: string;
+
+  if (repoParam) {
+    const parts = repoParam.split("/");
+    if (parts.length !== 2) throw new Error(`Invalid repo format: ${repoParam}. Expected owner/repo`);
+    owner = parts[0];
+    repo = parts[1];
+  } else {
+    owner = config.github.owner;
+    repo = config.github.repo;
+  }
   const issueRepo = `${owner}/${repo}`;
   
   try {

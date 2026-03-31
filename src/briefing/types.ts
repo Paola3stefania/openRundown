@@ -13,6 +13,7 @@ export interface ProjectContext {
   decisions: Decision[];
   activeIssues: ActiveIssue[];
   userSignals: UserSignal[];
+  techSignals: TechSignal[];
   codebaseNotes: CodebaseNote[];
   recentActivity: RecentActivity;
   preferences: Record<string, string>;
@@ -42,6 +43,14 @@ export interface UserSignal {
   period: string;
   summary: string;
   sources: string[];
+}
+
+export interface TechSignal {
+  theme: string;
+  tweetCount: number;
+  topAuthors: string[];
+  engagement: number;
+  summary: string;
 }
 
 export interface CodebaseNote {
@@ -88,5 +97,6 @@ export interface BriefingOptions {
   scope?: string;
   since?: string;
   project?: string;
+  repo?: string;
   maxTokens?: number;
 }

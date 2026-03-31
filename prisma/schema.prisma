@@ -177,7 +177,9 @@ model ClassificationHistory {
 }
 
 model GitHubIssue {
-  issueNumber          Int      @id @map("issue_number")
+  id                   String   @id
+  issueRepo            String   @map("issue_repo")
+  issueNumber          Int      @map("issue_number")
   issueTitle           String   @map("issue_title")
   issueUrl             String   @map("issue_url")
   issueState           String?  @map("issue_state")
@@ -233,6 +235,8 @@ model GitHubIssue {
   threadMatches        IssueThreadMatch[] // Issue-centered thread matches
   pullRequests         GitHubPullRequest[] // PRs that reference this issue
 
+  @@unique([issueRepo, issueNumber])
+  @@index([issueRepo])
   @@index([matchedToThreads])
   @@index([exportStatus])
   @@index([issueState])
@@ -245,7 +249,9 @@ model GitHubIssue {
 
 // GitHub Pull Requests
 model GitHubPullRequest {
-  prNumber             Int      @id @map("pr_number")
+  id                   String   @id
+  prRepo               String   @map("pr_repo")
+  prNumber             Int      @map("pr_number")
   prTitle               String   @map("pr_title")
   prUrl                 String   @unique @map("pr_url")
   prState               String   @map("pr_state") // "open" | "closed"
@@ -263,6 +269,8 @@ model GitHubPullRequest {
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
+  @@unique([prRepo, prNumber])
+  @@index([prRepo])
   @@index([prState])
   @@index([prMerged])
   @@index([prAuthor])
@@ -272,6 +280,7 @@ model GitHubPullRequest {
 // Issue-centered thread matches (GitHub issue is primary, Discord threads are attached)
 model IssueThreadMatch {
   id              Int      @id @default(autoincrement())
+  issueId         String   @map("issue_id")
   issueNumber     Int      @map("issue_number")
   threadId        String   @map("thread_id")
   threadName      String?  @map("thread_name")
@@ -284,10 +293,10 @@ model IssueThreadMatch {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  issue           GitHubIssue @relation(fields: [issueNumber], references: [issueNumber], onDelete: Cascade)
+  issue           GitHubIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
 
-  @@unique([issueNumber, threadId])
-  @@index([issueNumber])
+  @@unique([issueId, threadId])
+  @@index([issueId])
   @@index([threadId])
   @@index([similarityScore(sort: Desc)])
   @@index([matchMethod])
@@ -295,14 +304,14 @@ model IssueThreadMatch {
 }
 
 model IssueEmbedding {
-  issueNumber Int      @id @map("issue_number")
+  issueId     String   @id @map("issue_id")
   embedding   Json     // Array of floats (1536 dimensions)
   contentHash String   @map("content_hash")
   model       String
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  issue GitHubIssue @relation(fields: [issueNumber], references: [issueNumber], onDelete: Cascade)
+  issue GitHubIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
 
   @@index([contentHash])
   @@index([model])
@@ -768,6 +777,52 @@ model AgentSession {
   @@index([startedAt(sort: Desc)])
   @@index([scope], type: Gin)
   @@map("agent_sessions")
+}
+
+// ============================================================================
+// X/Twitter Signal Source
+// ============================================================================
+
+model XPost {
+  id               String   @id
+  authorId         String   @map("author_id")
+  authorUsername   String   @map("author_username")
+  authorName      String?  @map("author_name")
+  authorFollowers  Int      @default(0) @map("author_followers")
+  content          String   @db.Text
+  hashtags         String[] @default([])
+  urls             String[] @default([])
+  likeCount        Int      @default(0) @map("like_count")
+  retweetCount     Int      @default(0) @map("retweet_count")
+  replyCount       Int      @default(0) @map("reply_count")
+  quoteCount       Int      @default(0) @map("quote_count")
+  lang             String?
+  conversationId   String?  @map("conversation_id")
+  inReplyToUserId  String?  @map("in_reply_to_user_id")
+  query            String?
+  postedAt         DateTime @map("posted_at")
+  fetchedAt        DateTime @default(now()) @map("fetched_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([postedAt(sort: Desc)])
+  @@index([authorUsername])
+  @@index([hashtags], type: Gin)
+  @@index([query])
+  @@map("x_posts")
+}
+
+model XWatchConfig {
+  id        String   @id @default(uuid())
+  projectId String   @default("default") @map("project_id")
+  type      String
+  value     String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([projectId, type, value])
+  @@index([projectId])
+  @@map("x_watch_configs")
 }
 
 // Learn from past fixes - stores closed issues with their merged PRs

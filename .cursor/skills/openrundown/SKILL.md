@@ -5,7 +5,7 @@ description: Provides project context and session memory for AI agents via the O
 
 # OpenRundown
 
-OpenRundown gives you persistent memory across sessions. It distills signals from Discord, GitHub, and past agent sessions into structured briefings so you never start blind.
+OpenRundown gives you persistent memory across sessions. It distills signals from Discord, GitHub, X/Twitter, and past agent sessions into structured briefings so you never start blind.
 
 ## Detecting the Project
 
@@ -24,7 +24,7 @@ Always do this before responding to the user:
    - Optionally pass `scope` if you know what area the user is working on
    - Optionally pass `since` with the last session timestamp
 3. Call `get_session_history` with `limit: 3` and `project` to see recent sessions
-4. Use the briefing to understand: active issues, recent decisions, open items, active plans, user signals
+4. Use the briefing to understand: active issues, recent decisions, open items, active plans, user signals, tech signals from X/Twitter
 5. If a previous session has `open_items`, proactively mention them
 6. **Resume active plans**: If the last session has `planSteps` with incomplete steps (pending/in_progress/blocked), show the plan status to the user and offer to continue from where the previous agent left off.
 7. **Recover auto-closed sessions**: If the most recent session's summary indicates it was auto-closed (e.g., "Auto-closed: session was never properly ended") and its `filesEdited`, `decisionsMade`, or `openItems` are empty, check if the `lastSession` from the briefing has a `scope`. If it does, mention to the user that the previous session (scope: `<scope>`) was lost without saving progress and ask if there is anything to record before moving on. This prevents silent data loss across agent handoffs.
@@ -90,3 +90,6 @@ Sessions can be lost at any time (chat disconnects, crashes, timeouts). Since yo
 | `update_agent_session` | Mid-session progress recording (include `plan_steps`!) |
 | `end_agent_session` | End of meaningful work |
 | `import_claude_plans` | Import plans from Claude Code's `~/.claude/plans/` |
+| `fetch_x_posts` | Fetch tweets by users, hashtags, or keywords |
+| `manage_x_watches` | Add/remove/list monitored X accounts and hashtags |
+| `search_x_posts` | Search stored tweets by content, author, engagement |

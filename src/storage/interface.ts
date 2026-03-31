@@ -191,7 +191,7 @@ export interface IStorage {
     assignees?: Array<{ login: string; avatar_url: string }>;
     milestone?: { title: string; state: string } | null;
     reactions?: GitHubReactions | null;
-  }>): Promise<void>;
+  }>, repo?: string): Promise<void>;
   getGitHubIssues(options?: {
     inGroup?: boolean;
     matchedToThreads?: boolean;

@@ -115,7 +115,7 @@ async function loadPersistentCache(): Promise<PersistentEmbeddingCache> {
       const embeddings = await prisma.issueEmbedding.findMany({
         where: { model: currentModel },
         select: {
-          issueNumber: true,
+          issueId: true,
           embedding: true,
           contentHash: true,
         },
@@ -123,7 +123,7 @@ async function loadPersistentCache(): Promise<PersistentEmbeddingCache> {
       
       const entries: { [key: string]: PersistentEmbeddingEntry } = {};
       for (const row of embeddings) {
-        entries[row.issueNumber.toString()] = {
+        entries[row.issueId] = {
           embedding: row.embedding as number[],
           contentHash: row.contentHash,
           createdAt: new Date().toISOString(),
@@ -178,40 +178,52 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
     }
     
     try {
-      // First, check which issues actually exist in the database
-      const issueNumbers = Object.keys(entries)
-        .filter((issueNumberStr) => !isNaN(parseInt(issueNumberStr, 10)))
-        .map((issueNumberStr) => parseInt(issueNumberStr, 10));
+      // Entry keys are issueIds (format: "repo#number") or legacy issue numbers
+      const config = getConfig();
+      const defaultRepo = `${config.github.owner}/${config.github.repo}`;
       
-      if (issueNumbers.length === 0) {
+      const issueIds = Object.keys(entries);
+      const validIssueIds: string[] = [];
+      for (const key of issueIds) {
+        if (key.includes("#")) {
+          validIssueIds.push(key);
+        } else {
+          const num = parseInt(key, 10);
+          if (!isNaN(num)) {
+            validIssueIds.push(`${defaultRepo}#${num}`);
+          }
+        }
+      }
+      
+      if (validIssueIds.length === 0) {
         return;
       }
       
       // Check which issues exist in gitHubIssue table
       const existingIssues = await prisma.gitHubIssue.findMany({
-        where: { issueNumber: { in: issueNumbers } },
-        select: { issueNumber: true },
+        where: { id: { in: validIssueIds } },
+        select: { id: true },
       });
       
-      const existingIssueNumbers = new Set(existingIssues.map(i => i.issueNumber));
+      const existingIssueIds = new Set(existingIssues.map(i => i.id));
       
       // Only save embeddings for issues that exist in the database
       const operations = Object.entries(entries)
-        .filter(([issueNumberStr]) => {
-          const issueNumber = parseInt(issueNumberStr, 10);
-          return !isNaN(issueNumber) && existingIssueNumbers.has(issueNumber);
+        .filter(([key]) => {
+          const issueId = key.includes("#") ? key : `${defaultRepo}#${parseInt(key, 10)}`;
+          return existingIssueIds.has(issueId);
         })
-        .map(([issueNumberStr, entry]) => {
-          const issueNumber = parseInt(issueNumberStr, 10);
+        .map(([key, entry]) => {
+          const issueId = key.includes("#") ? key : `${defaultRepo}#${parseInt(key, 10)}`;
           return prisma.issueEmbedding.upsert({
-            where: { issueNumber },
+            where: { issueId },
             update: {
               embedding: entry.embedding as Prisma.InputJsonValue,
               contentHash: entry.contentHash,
               model: currentModel,
             },
             create: {
-              issueNumber,
+              issueId,
               embedding: entry.embedding as Prisma.InputJsonValue,
               contentHash: entry.contentHash,
               model: currentModel,
@@ -223,7 +235,7 @@ async function savePersistentCache(cache: PersistentEmbeddingCache): Promise<voi
         await prisma.$transaction(operations);
       }
       
-      const skippedCount = issueNumbers.length - existingIssueNumbers.size;
+      const skippedCount = validIssueIds.length - existingIssueIds.size;
       if (skippedCount > 0) {
         logProgress(`Skipped ${skippedCount} issue embeddings (issues not found in database)`);
       }
@@ -486,9 +498,13 @@ async function precomputeIssueEmbeddings(
   let hashMismatchCount = 0;
   let missingFromCacheCount = 0;
   
+  const config = getConfig();
+  const defaultRepo = `${config.github.owner}/${config.github.repo}`;
+  
   for (const issue of issues) {
+    const issueId = `${defaultRepo}#${issue.number}`;
     const issueKey = `issue:${issue.number}`;
-    const cachedEntry = persistentCache.entries[issue.number.toString()];
+    const cachedEntry = persistentCache.entries[issueId] ?? persistentCache.entries[issue.number.toString()];
     const currentHash = hashIssueContent(issue);
     
     if (cachedEntry && cachedEntry.contentHash === currentHash) {
@@ -545,8 +561,8 @@ async function precomputeIssueEmbeddings(
         // Store in memory cache
         embeddingCache[issueCacheKey] = embedding;
         
-        // Store in persistent cache
-        persistentCache.entries[issue.number.toString()] = {
+        // Store in persistent cache (use issueId for DB compatibility)
+        persistentCache.entries[`${defaultRepo}#${issue.number}`] = {
           embedding,
           contentHash: hashIssueContent(issue),
           createdAt: new Date().toISOString(),
@@ -566,7 +582,7 @@ async function precomputeIssueEmbeddings(
           const embedding = await createEmbedding(issueText, apiKey);
           
           embeddingCache[issueCacheKey] = embedding;
-          persistentCache.entries[issue.number.toString()] = {
+          persistentCache.entries[`${defaultRepo}#${issue.number}`] = {
             embedding,
             contentHash: hashIssueContent(issue),
             createdAt: new Date().toISOString(),
@@ -581,7 +597,7 @@ async function precomputeIssueEmbeddings(
               const issueText = createIssueText(issue);
               const embedding = await createEmbedding(issueText, apiKey);
               embeddingCache[issueCacheKey] = embedding;
-              persistentCache.entries[issue.number.toString()] = {
+              persistentCache.entries[`${defaultRepo}#${issue.number}`] = {
                 embedding,
                 contentHash: hashIssueContent(issue),
                 createdAt: new Date().toISOString(),

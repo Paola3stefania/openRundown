@@ -4,7 +4,7 @@
  * All connectors (Discord, Slack, GitHub) produce Signals,
  * which are then processed by core classification/correlation logic.
  */
-export type SignalSource = "discord" | "slack" | "github";
+export type SignalSource = "discord" | "slack" | "github" | "x";
 
 export interface Signal {
   source: SignalSource;

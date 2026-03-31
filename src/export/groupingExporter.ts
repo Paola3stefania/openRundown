@@ -2002,9 +2002,11 @@ export async function exportGroupingToPMTool(
                 // Fallback: save to GitHubIssue table if UngroupedIssue model doesn't exist yet
                 // This can happen if Prisma client hasn't been regenerated after schema update
                 logError(`UngroupedIssue model not available in Prisma client. Please run 'npx prisma generate'. Saving to GitHubIssue table instead.`);
-                // Type assertion needed until Prisma client is regenerated
+                const config = getConfig();
+                const defaultRepo = `${config.github.owner}/${config.github.repo}`;
+                const issueId = `${defaultRepo}#${issue.number}`;
                 await prisma.gitHubIssue.upsert({
-                  where: { issueNumber: issue.number },
+                  where: { id: issueId },
                   update: {
                     issueTitle: issue.title || `Issue #${issue.number}`,
                     issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
@@ -2015,6 +2017,8 @@ export async function exportGroupingToPMTool(
                     issueCreatedAt: issue.created_at ? new Date(issue.created_at) : null,
                   },
                   create: {
+                    id: issueId,
+                    issueRepo: defaultRepo,
                     issueNumber: issue.number,
                     issueTitle: issue.title || `Issue #${issue.number}`,
                     issueUrl: issue.url || `https://github.com/issues/${issue.number}`,
@@ -2337,9 +2341,8 @@ export async function exportGroupingToPMTool(
               },
             });
           } else {
-            // Fallback: update GitHubIssue model export status using update (single record)
-            // Type assertion needed: exportStatus exists in schema but Prisma client types may be out of sync
-            await prisma.gitHubIssue.update({
+            // Fallback: update GitHubIssue model export status using updateMany (we only have issueNumber)
+            await prisma.gitHubIssue.updateMany({
               where: { issueNumber },
               data: {
                 exportStatus: "exported",
@@ -3453,7 +3456,7 @@ export async function exportIssuesToPMTool(
         
         if (detectedLabels.length > 0) {
           await prisma.gitHubIssue.update({
-            where: { issueNumber: issue.issueNumber },
+            where: { id: issue.id },
             data: { detectedLabels },
           });
           
@@ -4508,7 +4511,7 @@ export async function exportIssuesToPMTool(
               currentLabelNames = new Set(currentLinearIssue.labelNames);
               // Save to DB
               await prisma.gitHubIssue.update({
-                where: { issueNumber: issue.issueNumber },
+                where: { id: issue.id },
                 data: { linearLabels: Array.from(currentLabelNames) },
               });
             }
@@ -4665,7 +4668,7 @@ export async function exportIssuesToPMTool(
                   // Save updated labels to DB
                   if (updates.labels) {
                     await prisma.gitHubIssue.update({
-                      where: { issueNumber: issue.issueNumber },
+                      where: { id: issue.id },
                       data: { linearLabels: updates.labels },
                     });
                   }
@@ -4810,10 +4813,10 @@ export async function exportIssuesToPMTool(
               updatedCount++;
               log(`    Updated group ${groupId} -> exported`);
             } else if (pmIssue.source_id.startsWith("github-issue-")) {
-              // Update issue export status
+              // Update issue export status (we only have issueNumber from source_id, use updateMany)
               const issueNumber = parseInt(pmIssue.source_id.replace("github-issue-", ""), 10);
               if (!isNaN(issueNumber)) {
-                await prisma.gitHubIssue.update({
+                await prisma.gitHubIssue.updateMany({
                   where: { issueNumber },
                   data: {
                     exportStatus: "exported",

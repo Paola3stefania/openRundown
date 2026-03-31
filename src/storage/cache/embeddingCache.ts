@@ -11,6 +11,15 @@ import { getConfig } from "../../config/index.js";
 import { prisma, checkPrismaConnection } from "../db/prisma.js";
 import type { Prisma } from "@prisma/client";
 
+/** Resolve cache id (issue number or issueId) to Prisma issueId for IssueEmbedding. Returns null if invalid. */
+function resolveIssueId(id: string): string | null {
+  if (id.includes("#")) return id;
+  const config = getConfig();
+  const defaultRepo = `${config.github.owner}/${config.github.repo}`;
+  const num = parseInt(id, 10);
+  return !isNaN(num) ? `${defaultRepo}#${num}` : null;
+}
+
 // Embedding vector type (OpenAI returns 1536-dimensional vectors)
 export type Embedding = number[];
 
@@ -184,17 +193,17 @@ export async function getCachedEmbedding(
   // For issue embeddings, try database first if available
   if (cacheType === "issues" && await isDatabaseAvailable()) {
     try {
-      const issueNumber = parseInt(id, 10);
-      if (!isNaN(issueNumber)) {
+      const issueId = resolveIssueId(id);
+      if (issueId) {
         const currentModel = getEmbeddingModel();
         const result = await prisma.issueEmbedding.findUnique({
-          where: { issueNumber },
-          select: {
-            embedding: true,
-            contentHash: true,
-            model: true,
-          },
-        });
+        where: { issueId },
+        select: {
+          embedding: true,
+          contentHash: true,
+          model: true,
+        },
+      });
         
         if (result && result.model === currentModel) {
           if (result.contentHash === contentHash) {
@@ -278,23 +287,23 @@ export async function setCachedEmbedding(
     }
     
     try {
-      const issueNumber = parseInt(id, 10);
-      if (!isNaN(issueNumber)) {
+      const issueId = resolveIssueId(id);
+      if (issueId) {
         const currentModel = getEmbeddingModel();
         await prisma.issueEmbedding.upsert({
-          where: { issueNumber },
-          update: {
-            embedding: embedding as Prisma.InputJsonValue,
-            contentHash,
-            model: currentModel,
-          },
-          create: {
-            issueNumber,
-            embedding: embedding as Prisma.InputJsonValue,
-            contentHash,
-            model: currentModel,
-          },
-        });
+        where: { issueId },
+        update: {
+          embedding: embedding as Prisma.InputJsonValue,
+          contentHash,
+          model: currentModel,
+        },
+        create: {
+          issueId,
+          embedding: embedding as Prisma.InputJsonValue,
+          contentHash,
+          model: currentModel,
+        },
+      });
         return; // Successfully saved to database, skip JSON cache
       }
     } catch (error) {
@@ -360,7 +369,9 @@ export async function batchSetCachedEmbeddings(
     
     try {
       const currentModel = getEmbeddingModel();
-      const itemsToSave = items.filter(item => !isNaN(parseInt(item.id, 10)));
+      const itemsToSave = items
+        .map((item) => ({ ...item, issueId: resolveIssueId(item.id) }))
+        .filter((item): item is typeof item & { issueId: string } => item.issueId !== null);
       
       if (itemsToSave.length > 0) {
         // Save to memory cache
@@ -372,16 +383,15 @@ export async function batchSetCachedEmbeddings(
         // Batch save in a single transaction
         await prisma.$transaction(async (tx) => {
           await Promise.all(itemsToSave.map((item) => {
-            const issueNumber = parseInt(item.id, 10);
             return tx.issueEmbedding.upsert({
-              where: { issueNumber },
+              where: { issueId: item.issueId },
               update: {
                 embedding: item.embedding as Prisma.InputJsonValue,
                 contentHash: item.contentHash,
                 model: currentModel,
               },
               create: {
-                issueNumber,
+                issueId: item.issueId,
                 embedding: item.embedding as Prisma.InputJsonValue,
                 contentHash: item.contentHash,
                 model: currentModel,
@@ -473,14 +483,14 @@ export async function getAllCachedEmbeddings(
       const embeddings = await prisma.issueEmbedding.findMany({
         where: { model: currentModel },
         select: {
-          issueNumber: true,
+          issueId: true,
           embedding: true,
         },
       });
       
       const embeddingsMap = new Map<string, Embedding>();
       for (const row of embeddings) {
-        const id = row.issueNumber.toString();
+        const id = row.issueId;
         const embedding = row.embedding as number[];
         embeddingsMap.set(id, embedding);
         // Also populate memory cache

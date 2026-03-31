@@ -9,6 +9,7 @@ import type { ProductFeature } from "../../export/types.js";
 import { prisma } from "./prisma.js";
 import { Decimal } from "@prisma/client/runtime/client";
 import { Prisma } from "@prisma/client";
+import { getConfig } from "../../config/index.js";
 
 export class DatabaseStorage implements IStorage {
   async upsertChannel(channelId: string, channelName?: string, guildId?: string): Promise<void> {
@@ -1218,11 +1219,11 @@ export class DatabaseStorage implements IStorage {
     assignees?: Array<{ login: string; avatar_url: string }>;
     milestone?: { title: string; state: string } | null;
     reactions?: GitHubReactions | null;
-  }>): Promise<void> {
+  }>, repo?: string): Promise<void> {
     if (issues.length === 0) return;
 
-    // Process issues in batches to avoid transaction timeout
-    // Batch size of 50 should keep each transaction under 5 seconds
+    const issueRepo = repo || `${getConfig().github.owner}/${getConfig().github.repo}`;
+
     const BATCH_SIZE = 50;
     const batches: typeof issues[] = [];
     
@@ -1230,12 +1231,12 @@ export class DatabaseStorage implements IStorage {
       batches.push(issues.slice(i, i + BATCH_SIZE));
     }
 
-    // Process each batch in a separate transaction with increased timeout
     for (const batch of batches) {
       await prisma.$transaction(async (tx) => {
         for (const issue of batch) {
+          const issueId = `${issueRepo}#${issue.number}`;
           await tx.gitHubIssue.upsert({
-            where: { issueNumber: issue.number },
+            where: { id: issueId },
             update: {
               issueTitle: issue.title,
               issueUrl: issue.url,
@@ -1251,6 +1252,8 @@ export class DatabaseStorage implements IStorage {
               issueReactions: issue.reactions ? (JSON.parse(JSON.stringify(issue.reactions)) as Prisma.InputJsonValue) : Prisma.JsonNull,
             },
             create: {
+              id: issueId,
+              issueRepo,
               issueNumber: issue.number,
               issueTitle: issue.title,
               issueUrl: issue.url,
@@ -1268,7 +1271,7 @@ export class DatabaseStorage implements IStorage {
           });
         }
       }, {
-        timeout: 30000, // 30 seconds timeout per batch (should be more than enough for 50 issues)
+        timeout: 30000,
       });
     }
   }

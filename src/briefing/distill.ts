@@ -14,6 +14,7 @@ import type {
   ProjectContext,
   ActiveIssue,
   UserSignal,
+  TechSignal,
   CodebaseNote,
   Decision,
   RecentActivity,
@@ -25,6 +26,7 @@ const MAX_ACTIVE_ISSUES = 10;
 const MAX_USER_SIGNALS = 5;
 const MAX_CODEBASE_NOTES = 5;
 const MAX_DECISIONS = 5;
+const MAX_TECH_SIGNALS = 5;
 
 export async function distillBriefing(options: BriefingOptions = {}): Promise<ProjectContext> {
   const since = options.since
@@ -33,19 +35,22 @@ export async function distillBriefing(options: BriefingOptions = {}): Promise<Pr
 
   const scope = options.scope?.toLowerCase();
   const projectId = options.project ?? detectProjectId();
+  const repo = options.repo;
 
   const [
     activeIssues,
     userSignals,
+    techSignals,
     codebaseNotes,
     decisions,
     recentActivity,
     preferences,
   ] = await Promise.all([
-    distillActiveIssues(since, scope),
+    distillActiveIssues(since, scope, repo),
     distillUserSignals(since, scope),
+    distillTechSignals(since, scope),
     distillCodebaseNotes(scope),
-    distillDecisions(since, scope),
+    distillDecisions(since, scope, repo),
     distillRecentActivity(since),
     loadPreferences(projectId),
   ]);
@@ -57,17 +62,19 @@ export async function distillBriefing(options: BriefingOptions = {}): Promise<Pr
     decisions,
     activeIssues,
     userSignals,
+    techSignals,
     codebaseNotes,
     recentActivity,
     preferences,
   };
 }
 
-async function distillActiveIssues(since: Date, scope?: string): Promise<ActiveIssue[]> {
+async function distillActiveIssues(since: Date, scope?: string, repo?: string): Promise<ActiveIssue[]> {
   const issues = await prisma.gitHubIssue.findMany({
     where: {
       issueState: "open",
       issueCreatedAt: { gte: since },
+      ...(repo ? { issueRepo: repo } : {}),
       ...(scope
         ? {
             OR: [
@@ -220,13 +227,14 @@ async function distillCodebaseNotes(scope?: string): Promise<CodebaseNote[]> {
   return notes.slice(0, MAX_CODEBASE_NOTES);
 }
 
-async function distillDecisions(since: Date, scope?: string): Promise<Decision[]> {
+async function distillDecisions(since: Date, scope?: string, repo?: string): Promise<Decision[]> {
   const decisions: Decision[] = [];
 
   const mergedPRs = await prisma.gitHubPullRequest.findMany({
     where: {
       prMerged: true,
       prCreatedAt: { gte: since },
+      ...(repo ? { prRepo: repo } : {}),
       ...(scope
         ? {
             OR: [
@@ -303,6 +311,85 @@ async function loadPreferences(projectId: string): Promise<Record<string, string
   return {
     lastScope: lastSession?.scope?.join(", ") ?? "none",
   };
+}
+
+async function distillTechSignals(since: Date, scope?: string): Promise<TechSignal[]> {
+  try {
+    const posts = await prisma.xPost.findMany({
+      where: {
+        postedAt: { gte: since },
+        ...(scope
+          ? { content: { contains: scope, mode: "insensitive" } }
+          : {}),
+      },
+      orderBy: { postedAt: "desc" },
+      take: 500,
+    });
+
+    if (posts.length === 0) return [];
+
+    const themeMap = new Map<string, {
+      tweets: typeof posts;
+      engagement: number;
+      authors: Set<string>;
+    }>();
+
+    for (const post of posts) {
+      const tags = post.hashtags.length > 0 ? post.hashtags : ["general"];
+      const engagement = post.likeCount + post.retweetCount + post.quoteCount;
+
+      for (const tag of tags) {
+        const key = tag.toLowerCase();
+        const existing = themeMap.get(key);
+        if (existing) {
+          existing.tweets.push(post);
+          existing.engagement += engagement;
+          existing.authors.add(post.authorUsername);
+        } else {
+          themeMap.set(key, {
+            tweets: [post],
+            engagement,
+            authors: new Set([post.authorUsername]),
+          });
+        }
+      }
+    }
+
+    const themes = [...themeMap.entries()]
+      .filter(([, data]) => data.tweets.length >= 2)
+      .sort((a, b) => b[1].engagement - a[1].engagement)
+      .slice(0, MAX_TECH_SIGNALS);
+
+    return themes.map(([theme, data]) => {
+      const topAuthors = [...data.authors]
+        .map((username) => {
+          const authorPosts = data.tweets.filter((t) => t.authorUsername === username);
+          const totalFollowers = Math.max(...authorPosts.map((t) => t.authorFollowers));
+          return { username, followers: totalFollowers };
+        })
+        .sort((a, b) => b.followers - a.followers)
+        .slice(0, 3)
+        .map((a) => a.username);
+
+      const topPost = data.tweets
+        .sort((a, b) =>
+          (b.likeCount + b.retweetCount + b.quoteCount) -
+          (a.likeCount + a.retweetCount + a.quoteCount),
+        )[0];
+
+      return {
+        theme: `#${theme}`,
+        tweetCount: data.tweets.length,
+        topAuthors,
+        engagement: data.engagement,
+        summary: topPost
+          ? `Top post by @${topPost.authorUsername}: "${topPost.content.slice(0, 120)}..."`
+          : `${data.tweets.length} posts from ${data.authors.size} authors`,
+      };
+    });
+  } catch {
+    return [];
+  }
 }
 
 function getReactionCount(reactions: unknown): number {

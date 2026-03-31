@@ -1629,18 +1629,20 @@ export async function computeAndSaveThreadEmbeddings(
 export async function saveIssueEmbedding(
   issueNumber: number,
   embedding: Embedding,
-  contentHash: string
+  contentHash: string,
+  issueId?: string
 ): Promise<void> {
   const model = getEmbeddingModel();
+  const id = issueId || `${issueNumber}`;
   await prisma.issueEmbedding.upsert({
-    where: { issueNumber },
+    where: { issueId: id },
     update: {
       embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
     },
     create: {
-      issueNumber,
+      issueId: id,
       embedding: embedding as Prisma.InputJsonValue,
       contentHash,
       model,
@@ -1655,11 +1657,13 @@ export async function saveIssueEmbedding(
  */
 export async function getIssueEmbedding(
   issueNumber: number,
-  currentContentHash?: string
+  currentContentHash?: string,
+  issueId?: string
 ): Promise<Embedding | null> {
   const model = getEmbeddingModel();
+  const id = issueId || `${issueNumber}`;
   const result = await prisma.issueEmbedding.findUnique({
-    where: { issueNumber },
+    where: { issueId: id },
     select: { embedding: true, model: true, contentHash: true },
   });
 
@@ -1697,6 +1701,7 @@ export async function computeAndSaveIssueEmbeddings(
   // Get all issues with full conversation data
   const allIssues = await prisma.gitHubIssue.findMany({
     select: {
+      id: true,
       issueNumber: true,
       issueTitle: true,
       issueBody: true,
@@ -1709,24 +1714,24 @@ export async function computeAndSaveIssueEmbeddings(
   });
 
   // Check which issues already have embeddings (skip if force=true)
-  const existingHashes = new Map<number, string>();
+  const existingHashes = new Map<string, string>();
   if (!force) {
     const existingEmbeddings = await prisma.issueEmbedding.findMany({
       where: { model },
       select: {
-        issueNumber: true,
+        issueId: true,
         contentHash: true,
       },
     });
 
     for (const row of existingEmbeddings) {
-      existingHashes.set(row.issueNumber, row.contentHash);
+      existingHashes.set(row.issueId, row.contentHash);
     }
   }
 
   // Compute content hashes and find issues that need embeddings
   // Build issue text including full conversation: title + body + labels + comments + assignees + milestone
-  const issuesToEmbed: Array<{ issueNumber: number; issueTitle: string; issueBody: string | null; issueLabels: string[]; content: string }> = [];
+  const issuesToEmbed: Array<{ id: string; issueNumber: number; issueTitle: string; issueBody: string | null; issueLabels: string[]; content: string }> = [];
   for (const issue of allIssues) {
     // Extract comment texts from JSONB array
     interface IssueComment { body?: string; user?: { login?: string } }
@@ -1765,11 +1770,11 @@ export async function computeAndSaveIssueEmbeddings(
     const issueText = issueTextParts.join("\n\n");
     
     const currentHash = hashContent(issueText);
-    const existingHash = existingHashes.get(issue.issueNumber);
+    const existingHash = existingHashes.get(issue.id);
 
-    // If force=true, recompute all. Otherwise, only compute if missing or changed
     if (force || !existingHash || existingHash !== currentHash) {
       issuesToEmbed.push({
+        id: issue.id,
         issueNumber: issue.issueNumber,
         issueTitle: issue.issueTitle,
         issueBody: issue.issueBody,
@@ -1806,14 +1811,14 @@ export async function computeAndSaveIssueEmbeddings(
             const contentText = textsToEmbed[j];
             const contentHash = hashContent(contentText);
             return tx.issueEmbedding.upsert({
-              where: { issueNumber: issue.issueNumber },
+              where: { issueId: issue.id },
               update: {
                 embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
               },
               create: {
-                issueNumber: issue.issueNumber,
+                issueId: issue.id,
                 embedding: embedding as Prisma.InputJsonValue,
                 contentHash,
                 model,
@@ -1851,14 +1856,14 @@ export async function computeAndSaveIssueEmbeddings(
           const contentHash = hashContent(issue.content);
 
           await prisma.issueEmbedding.upsert({
-            where: { issueNumber: issue.issueNumber },
+            where: { issueId: issue.id },
             update: {
               embedding: embedding as Prisma.InputJsonValue,
               contentHash,
               model,
             },
             create: {
-              issueNumber: issue.issueNumber,
+              issueId: issue.id,
               embedding: embedding as Prisma.InputJsonValue,
               contentHash,
               model,

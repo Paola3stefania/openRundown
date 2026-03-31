@@ -557,12 +557,22 @@ export async function setLinearIssueInProgressAndAssign(
 export async function savePRsToDatabase(
   prs: GitHubPR[],
   prisma: PrismaClient,
-  linkedIssueNumbers: number[]
+  linkedIssueNumbers: number[],
+  repo?: string
 ): Promise<void> {
+  const prRepo = repo || `${getConfig().github.owner}/${getConfig().github.repo}`;
+  const issueRepo = prRepo;
+
   for (const pr of prs) {
+    const prId = `${prRepo}#${pr.number}`;
+    const issueConnections = linkedIssueNumbers.map(num => ({
+      id: `${issueRepo}#${num}`,
+    }));
     await prisma.gitHubPullRequest.upsert({
       where: { prUrl: pr.html_url },
       create: {
+        id: prId,
+        prRepo,
         prNumber: pr.number,
         prTitle: pr.title,
         prUrl: pr.html_url,
@@ -575,7 +585,7 @@ export async function savePRsToDatabase(
         prHeadRef: pr.head.ref,
         prBaseRef: pr.base.ref,
         linkedIssues: {
-          connect: linkedIssueNumbers.map(num => ({ issueNumber: num })),
+          connect: issueConnections,
         },
       },
       update: {
@@ -587,7 +597,7 @@ export async function savePRsToDatabase(
         prHeadRef: pr.head.ref,
         prBaseRef: pr.base.ref,
         linkedIssues: {
-          connect: linkedIssueNumbers.map(num => ({ issueNumber: num })),
+          connect: issueConnections,
         },
       },
     });

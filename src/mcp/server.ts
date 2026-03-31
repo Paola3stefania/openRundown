@@ -273,6 +273,10 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_OWNER/GITHUB_REPO from config.",
+        },
         incremental: {
           type: "boolean",
           description: "If true and cache exists, only fetches new/updated issues. If false or no cache, fetches all issues.",
@@ -1124,6 +1128,10 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_OWNER/GITHUB_REPO from config.",
+        },
         since: {
           type: "string",
           description: "ISO date to fetch issues from (e.g., '2023-01-01'). Defaults to all time.",
@@ -1152,6 +1160,10 @@ const tools: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
+        repo: {
+          type: "string",
+          description: "Repository in format 'owner/repo'. Defaults to GITHUB_OWNER/GITHUB_REPO from config.",
+        },
         pr_number: {
           type: "number",
           description: "PR number to learn from.",
@@ -1520,6 +1532,108 @@ const tools: Tool[] = [
       required: [],
     },
   },
+  // ========================================================================
+  // X/Twitter Signal Source
+  // ========================================================================
+  {
+    name: "fetch_x_posts",
+    description: "Fetch recent tweets from X/Twitter using the search API. Can search by raw query, specific users, hashtags, or keywords. If called with no arguments, automatically uses saved watch configs (from manage_x_watches). Stores results in the database for later search and briefing. Supports incremental fetching via since_id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Raw X search query (e.g., 'from:levelsio passkey'). If provided, users/hashtags/keywords are ignored.",
+        },
+        users: {
+          type: "array",
+          items: { type: "string" },
+          description: "Usernames to fetch posts from (e.g., ['levelsio', 'raaborman']). Combined with OR.",
+        },
+        hashtags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Hashtags to search for (e.g., ['buildinpublic', 'webdev']). Combined with OR.",
+        },
+        keywords: {
+          type: "array",
+          items: { type: "string" },
+          description: "Keywords to search for (e.g., ['passkey', 'auth']). Combined with OR.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of tweets to fetch (default: 100, max: 500).",
+        },
+        incremental: {
+          type: "boolean",
+          description: "If true, only fetch tweets newer than the most recent stored tweet for this query (default: true).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "manage_x_watches",
+    description: "Configure what to monitor on X/Twitter. Add, remove, or list watch configurations (users, hashtags, keywords) that fetch_x_posts can use to automatically pull relevant posts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["add", "remove", "list"],
+          description: "Action to perform.",
+        },
+        type: {
+          type: "string",
+          enum: ["user", "hashtag", "keyword"],
+          description: "Type of watch (required for add/remove).",
+        },
+        value: {
+          type: "string",
+          description: "Value to watch (e.g., 'levelsio', 'buildinpublic', 'passkey auth'). Required for add/remove.",
+        },
+        project: {
+          type: "string",
+          description: "Project identifier. Defaults to auto-detected project.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "search_x_posts",
+    description: "Search stored X/Twitter posts in the database. Filter by text, author, hashtag, and minimum engagement. Returns posts sorted by engagement score.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Text to search for in post content.",
+        },
+        author: {
+          type: "string",
+          description: "Filter by author username.",
+        },
+        hashtag: {
+          type: "string",
+          description: "Filter by hashtag (without #).",
+        },
+        min_engagement: {
+          type: "number",
+          description: "Minimum engagement score (likes + retweets + quotes) to include.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of results (default: 20).",
+        },
+        days: {
+          type: "number",
+          description: "Only include posts from the last N days (default: 7).",
+        },
+      },
+      required: [],
+    },
+  },
   {
     name: "save_memory",
     description: "Save a memory entry (conversation insight, decision, learning) with semantic embedding for future retrieval. Use this to persist important things discussed so they can be recalled in future sessions.",
@@ -1674,6 +1788,9 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     "search_memory",
     "get_recent_memories",
     "delete_memory",
+    "fetch_x_posts",
+    "manage_x_watches",
+    "search_x_posts",
   ]);
 
   try {
@@ -2012,7 +2129,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "fetch_github_issues": {
-      const { incremental = false, limit } = args as { incremental?: boolean; limit?: number };
+      const { repo, incremental = false, limit } = args as { repo?: string; incremental?: boolean; limit?: number };
       const config = getConfig();
       const githubConfig = config;
       const cachePath = join(process.cwd(), githubConfig.paths.cacheDir, githubConfig.paths.issuesCacheFile);
@@ -2127,18 +2244,27 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
         
         let newIssues: GitHubIssue[];
+        let fetchOwner: string | undefined;
+        let fetchRepo: string | undefined;
+        if (repo) {
+          const parts = repo.split("/");
+          if (parts.length !== 2) throw new Error(`Invalid repo format: ${repo}. Expected owner/repo`);
+          fetchOwner = parts[0];
+          fetchRepo = parts[1];
+        }
+
         try {
           newIssues = await fetchAllGitHubIssues(
-            tokenManager, // Pass token manager instead of single token
+            tokenManager,
             true, 
-            undefined, 
-            undefined, 
+            fetchOwner, 
+            fetchRepo, 
             sinceDate, 
             actualLimit,
-            true, // includeComments
-            existingIssuesForResume, // Pass existing issues for resume
-            onBatchComplete, // Pass callback for incremental saving
-            existingIssueNumbers.length > 0 && !incremental ? existingIssueNumbers : undefined // Pass issue numbers for Phase 1 resume
+            true,
+            existingIssuesForResume,
+            onBatchComplete,
+            existingIssueNumbers.length > 0 && !incremental ? existingIssueNumbers : undefined
           );
         } catch (error) {
           // Check if error is due to all tokens being exhausted
@@ -2261,7 +2387,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }));
             
             console.error(`[GitHub Issues] Saving ${issuesToSave.length} issues to database...`);
-            await storage.saveGitHubIssues(issuesToSave);
+            await storage.saveGitHubIssues(issuesToSave, repo);
             console.error(`[GitHub Issues] Successfully saved ${issuesToSave.length} issues to database.`);
             savedToDatabase = true;
           } catch (dbError) {
@@ -4567,7 +4693,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error("[Sync] Step 4: Grouping ungrouped GitHub issues...");
         const ungroupedIssues = await prisma.gitHubIssue.findMany({
           where: { issueState: "open", groupId: null },
-          select: { issueNumber: true },
+          select: { id: true, issueNumber: true, issueTitle: true },
         });
 
         let groupsCreated = 0;
@@ -4576,31 +4702,31 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (ungroupedIssues.length > 0) {
           // Load embeddings for ungrouped issues
           const issueEmbs = await prisma.issueEmbedding.findMany({
-            where: { issueNumber: { in: ungroupedIssues.map(i => i.issueNumber) } },
+            where: { issueId: { in: ungroupedIssues.map(i => i.id) } },
           });
-          const embMap = new Map(issueEmbs.map(e => [e.issueNumber, e.embedding as number[]]));
+          const embMap = new Map(issueEmbs.map(e => [e.issueId, e.embedding as number[]]));
 
           // Simple clustering: group issues with similarity >= 80%
-          const grouped = new Set<number>();
-          const newGroups: number[][] = [];
+          const grouped = new Set<string>();
+          const newGroups: string[][] = [];
 
           for (const issue of ungroupedIssues) {
-            if (grouped.has(issue.issueNumber)) continue;
-            const emb1 = embMap.get(issue.issueNumber);
+            if (grouped.has(issue.id)) continue;
+            const emb1 = embMap.get(issue.id);
             if (!emb1) continue;
 
-            const group = [issue.issueNumber];
-            grouped.add(issue.issueNumber);
+            const group = [issue.id];
+            grouped.add(issue.id);
 
             for (const other of ungroupedIssues) {
-              if (grouped.has(other.issueNumber)) continue;
-              const emb2 = embMap.get(other.issueNumber);
+              if (grouped.has(other.id)) continue;
+              const emb2 = embMap.get(other.id);
               if (!emb2) continue;
 
               const sim = cosineSimilarity(emb1, emb2) * 100;
               if (sim >= 80) {
-                group.push(other.issueNumber);
-                grouped.add(other.issueNumber);
+                group.push(other.id);
+                grouped.add(other.id);
               }
             }
 
@@ -4611,17 +4737,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Save groups to database
           for (const group of newGroups) {
-            const groupId = `issue-group-${group[0]}-${Date.now()}`;
-            const firstIssue = await prisma.gitHubIssue.findUnique({
-              where: { issueNumber: group[0] },
-              select: { issueTitle: true },
-            });
+            const firstIssue = ungroupedIssues.find(i => i.id === group[0]);
+            const groupId = `issue-group-${firstIssue?.issueNumber ?? group[0]}-${Date.now()}`;
 
             await prisma.group.create({
               data: {
                 id: groupId,
                 channelId: actualChannelId,
-                githubIssueNumber: group[0],
+                githubIssueNumber: firstIssue?.issueNumber ?? 0,
                 suggestedTitle: firstIssue?.issueTitle || `Group ${group[0]}`,
                 threadCount: 0,
                 status: "pending",
@@ -4629,12 +4752,10 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             });
 
             // Link issues to group
-            for (const issueNum of group) {
-              await prisma.gitHubIssue.update({
-                where: { issueNumber: issueNum },
-                data: { groupId }, // inGroup is redundant - groupId not null = in group
-              });
-            }
+            await prisma.gitHubIssue.updateMany({
+              where: { id: { in: group } },
+              data: { groupId }, // inGroup is redundant - groupId not null = in group
+            });
 
             groupsCreated++;
             issuesGrouped += group.length;
@@ -4655,15 +4776,16 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Get issues not yet matched to threads
         const unmatchedIssues = await prisma.gitHubIssue.findMany({
           where: { issueState: "open", matchedToThreads: false },
-          select: { issueNumber: true },
+          select: { id: true, issueNumber: true },
         });
 
         let matchesCreated = 0;
 
         if (unmatchedIssues.length > 0 && discordCount > 0) {
           const issueEmbs = await prisma.issueEmbedding.findMany({
-            where: { issueNumber: { in: unmatchedIssues.map(i => i.issueNumber) } },
+            where: { issueId: { in: unmatchedIssues.map(i => i.id) } },
           });
+          const issueIdToNumber = new Map(unmatchedIssues.map(i => [i.id, i.issueNumber]));
           const threadEmbs = await prisma.threadEmbedding.findMany({
             include: { thread: { select: { threadName: true, firstMessageUrl: true } } },
           });
@@ -4681,12 +4803,14 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             if (matches.length > 0) {
+              const issueNumber = issueIdToNumber.get(issueEmb.issueId);
               // Save top matches
               for (const match of matches.slice(0, 5)) {
                 await prisma.issueThreadMatch.upsert({
-                  where: { issueNumber_threadId: { issueNumber: issueEmb.issueNumber, threadId: match.threadId } },
+                  where: { issueId_threadId: { issueId: issueEmb.issueId, threadId: match.threadId } },
                   create: {
-                    issueNumber: issueEmb.issueNumber,
+                    issueId: issueEmb.issueId,
+                    issueNumber: issueNumber ?? 0,
                     threadId: match.threadId,
                     threadName: match.threadName,
                     similarityScore: match.similarity,
@@ -4698,7 +4822,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
 
               await prisma.gitHubIssue.update({
-                where: { issueNumber: issueEmb.issueNumber },
+                where: { id: issueEmb.issueId },
                 data: { matchedToThreads: true },
               });
             }
@@ -4719,7 +4843,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         const unlabeledIssues = await prisma.gitHubIssue.findMany({
           where: { issueState: "open", detectedLabels: { isEmpty: true } },
-          select: { issueNumber: true, issueTitle: true, issueBody: true },
+          select: { id: true, issueNumber: true, issueTitle: true, issueBody: true },
           take: 20, // Batch limit for LLM calls
         });
 
@@ -4769,7 +4893,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     const labels = match[1].split(",").map(l => l.trim().toLowerCase()).filter(l => validLabels.includes(l));
                     if (labels.length > 0) {
                       await prisma.gitHubIssue.update({
-                        where: { issueNumber: batch[j].issueNumber },
+                        where: { id: batch[j].id },
                         data: { detectedLabels: labels },
                       });
                       issuesLabeled++;
@@ -4803,7 +4927,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             groupId: null, // Ungrouped issues
             affectsFeatures: { equals: [] },
           },
-          select: { issueNumber: true },
+          select: { id: true, issueNumber: true },
           take: 50,
         });
 
@@ -4816,7 +4940,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (features.length > 0) {
             const issueEmbs = await prisma.issueEmbedding.findMany({
-              where: { issueNumber: { in: unmatchedUngroupedIssues.map(i => i.issueNumber) } },
+              where: { issueId: { in: unmatchedUngroupedIssues.map(i => i.id) } },
             });
 
             for (const issueEmb of issueEmbs) {
@@ -4834,7 +4958,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
               if (matchedFeatures.length > 0) {
                 await prisma.gitHubIssue.update({
-                  where: { issueNumber: issueEmb.issueNumber },
+                  where: { id: issueEmb.issueId },
                   data: { affectsFeatures: matchedFeatures },
                 });
                 ungroupedFeaturesMatched++;
@@ -4851,7 +4975,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             groupId: { not: null }, // Issues in groups
             affectsFeatures: { equals: [] },
           },
-          select: { issueNumber: true },
+          select: { id: true, issueNumber: true },
           take: 50,
         });
 
@@ -4864,7 +4988,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (features.length > 0) {
             const issueEmbs = await prisma.issueEmbedding.findMany({
-              where: { issueNumber: { in: unmatchedGroupedIssues.map(i => i.issueNumber) } },
+              where: { issueId: { in: unmatchedGroupedIssues.map(i => i.id) } },
             });
 
             for (const issueEmb of issueEmbs) {
@@ -4882,7 +5006,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
               if (matchedFeatures.length > 0) {
                 await prisma.gitHubIssue.update({
-                  where: { issueNumber: issueEmb.issueNumber },
+                  where: { id: issueEmb.issueId },
                   data: { affectsFeatures: matchedFeatures },
                 });
                 groupedIssuesFeaturesMatched++;
@@ -7875,15 +7999,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // STEP 3: Load all issue embeddings for grouping
         const issueEmbeddings = await prisma.issueEmbedding.findMany({
           where: {
-            issueNumber: { in: allIssues.map(i => i.issueNumber) },
+            issueId: { in: allIssues.map(i => i.id) },
           },
         });
         console.error(`[GroupIssues] Loaded ${issueEmbeddings.length} embeddings`);
 
-        // Create embedding map
-        const embeddingMap = new Map<number, number[]>();
+        // Create embedding map (keyed by issue id)
+        const embeddingMap = new Map<string, number[]>();
         for (const emb of issueEmbeddings) {
-          embeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+          embeddingMap.set(emb.issueId, emb.embedding as number[]);
         }
 
         // STEP 4: Group issues by similarity using embeddings
@@ -7937,12 +8061,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Compare all pairs of issues
         const threshold = min_similarity / 100;
-        const issuesWithEmbeddings = allIssues.filter(i => embeddingMap.has(i.issueNumber));
+        const issuesWithEmbeddings = allIssues.filter(i => embeddingMap.has(i.id));
         
         for (let i = 0; i < issuesWithEmbeddings.length; i++) {
           for (let j = i + 1; j < issuesWithEmbeddings.length; j++) {
-            const embA = embeddingMap.get(issuesWithEmbeddings[i].issueNumber)!;
-            const embB = embeddingMap.get(issuesWithEmbeddings[j].issueNumber)!;
+            const embA = embeddingMap.get(issuesWithEmbeddings[i].id)!;
+            const embB = embeddingMap.get(issuesWithEmbeddings[j].id)!;
             const similarity = cosineSimilarity(embA, embB);
             
             if (similarity >= threshold) {
@@ -8014,12 +8138,12 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // STEP 5b: Match threads to issues using embeddings (direct comparison)
         const threadMatchThreshold = min_similarity / 100; // Use same threshold
         const issueThreadsMap = new Map<number, Array<{ threadId: string; threadName: string | null; similarity: number }>>();
-        const newMatches: Array<{ threadId: string; issueNumber: number; similarity: number; issueTitle: string; issueUrl: string; matchMethod: string }> = [];
+        const newMatches: Array<{ threadId: string; issueId: string; issueNumber: number; similarity: number; issueTitle: string; issueUrl: string; matchMethod: string }> = [];
 
         console.error(`[GroupIssues] Matching threads to issues using embeddings...`);
         for (const [threadId, threadData] of threadEmbeddingMap) {
           for (const issue of allIssues) {
-            const issueEmb = embeddingMap.get(issue.issueNumber);
+            const issueEmb = embeddingMap.get(issue.id);
             if (!issueEmb) continue;
 
             const similarity = cosineSimilarity(threadData.embedding, issueEmb);
@@ -8038,6 +8162,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
               // Track for database save
               newMatches.push({
                 threadId,
+                issueId: issue.id,
                 issueNumber: issue.issueNumber,
                 similarity: similarity * 100,
                 issueTitle: issue.issueTitle,
@@ -8073,12 +8198,13 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             try {
               await prisma.issueThreadMatch.upsert({
                 where: {
-                  issueNumber_threadId: {
-                    issueNumber: match.issueNumber,
+                  issueId_threadId: {
+                    issueId: match.issueId,
                     threadId: match.threadId,
                   },
                 },
                 create: {
+                  issueId: match.issueId,
                   issueNumber: match.issueNumber,
                   threadId: match.threadId,
                   threadName: threadDetail?.threadName || null,
@@ -9031,15 +9157,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Reload issue embeddings
         const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: { issueNumber: { in: allIssues.map(i => i.issueNumber) } },
+          where: { issueId: { in: allIssues.map(i => i.id) } },
         });
-        const issueEmbeddingMap = new Map<number, number[]>();
+        const issueEmbeddingMap = new Map<string, number[]>();
         for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
         }
 
         for (const issue of allIssues) {
-          const issueEmb = issueEmbeddingMap.get(issue.issueNumber);
+          const issueEmb = issueEmbeddingMap.get(issue.id);
           
           if (!issueEmb) {
             console.error(`[Issue Feature Matching] No embedding for issue #${issue.issueNumber}, skipping`);
@@ -9086,7 +9212,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Update issue in database
           await prisma.gitHubIssue.update({
-            where: { issueNumber: issue.issueNumber },
+            where: { id: issue.id },
             data: {
               affectsFeatures: affectsFeatures,
             },
@@ -9200,6 +9326,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             groupId: null, // Issues not in any group (inGroup is redundant - groupId null = not in group)
           },
           select: {
+            id: true,
             issueNumber: true,
             issueTitle: true,
             issueBody: true,
@@ -9297,15 +9424,15 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Load issue embeddings (ungrouped issues reuse embeddings from IssueEmbedding table)
         const issueEmbeddings = await prisma.issueEmbedding.findMany({
-          where: { issueNumber: { in: allUngroupedIssues.map(i => i.issueNumber) } },
+          where: { issueId: { in: allUngroupedIssues.map(i => i.id) } },
         });
-        const issueEmbeddingMap = new Map<number, number[]>();
+        const issueEmbeddingMap = new Map<string, number[]>();
         for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
         }
 
         for (const issue of allUngroupedIssues) {
-          const issueEmb = issueEmbeddingMap.get(issue.issueNumber);
+          const issueEmb = issueEmbeddingMap.get(issue.id);
           
           if (!issueEmb) {
             console.error(`[Ungrouped Issue Feature Matching] No embedding for ungrouped issue #${issue.issueNumber}, skipping`);
@@ -9352,7 +9479,7 @@ mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Update ungrouped issue in database (using GitHubIssue table)
           await prisma.gitHubIssue.update({
-            where: { issueNumber: issue.issueNumber },
+            where: { id: issue.id },
             data: {
               affectsFeatures: affectsFeatures,
             },
@@ -9832,7 +9959,7 @@ Example output:
                   
                   // Update issue in database
                   await prisma.gitHubIssue.update({
-                    where: { issueNumber: issue.issueNumber },
+                    where: { id: issue.id },
                     data: { detectedLabels },
                   });
                   
@@ -9930,6 +10057,7 @@ Example output:
         const allIssues = await prisma.gitHubIssue.findMany({
           where: issueFilter,
           select: {
+            id: true,
             issueNumber: true,
             issueTitle: true,
             issueUrl: true,
@@ -9961,15 +10089,15 @@ Example output:
         // Load issue embeddings
         const issueEmbeddings = await prisma.issueEmbedding.findMany({
           where: {
-            issueNumber: { in: allIssues.map(i => i.issueNumber) },
+            issueId: { in: allIssues.map(i => i.id) },
           },
         });
         console.error(`[MatchIssues] Loaded ${issueEmbeddings.length} issue embeddings`);
 
-        // Create issue embedding map
-        const issueEmbeddingMap = new Map<number, number[]>();
+        // Create issue embedding map (keyed by issue id)
+        const issueEmbeddingMap = new Map<string, number[]>();
         for (const emb of issueEmbeddings) {
-          issueEmbeddingMap.set(emb.issueNumber, emb.embedding as number[]);
+          issueEmbeddingMap.set(emb.issueId, emb.embedding as number[]);
         }
 
         // STEP 3: Compute/load thread embeddings
@@ -10030,6 +10158,7 @@ Example output:
 
         const threshold = min_similarity / 100;
         const newMatches: Array<{
+          issueId: string;
           issueNumber: number;
           threadId: string;
           threadName: string | null;
@@ -10044,13 +10173,14 @@ Example output:
           const threadVector = threadEmb.embedding as number[];
           
           for (const issue of allIssues) {
-            const issueVector = issueEmbeddingMap.get(issue.issueNumber);
+            const issueVector = issueEmbeddingMap.get(issue.id);
             if (!issueVector) continue;
 
             const similarity = cosineSimilarity(threadVector, issueVector);
             
             if (similarity >= threshold) {
               newMatches.push({
+                issueId: issue.id,
                 issueNumber: issue.issueNumber,
                 threadId: threadEmb.threadId,
                 threadName: threadEmb.thread.threadName,
@@ -10076,12 +10206,13 @@ Example output:
             try {
               await prisma.issueThreadMatch.upsert({
                 where: {
-                  issueNumber_threadId: {
-                    issueNumber: match.issueNumber,
+                  issueId_threadId: {
+                    issueId: match.issueId,
                     threadId: match.threadId,
                   },
                 },
                 create: {
+                  issueId: match.issueId,
                   issueNumber: match.issueNumber,
                   threadId: match.threadId,
                   threadName: match.threadName,
@@ -10105,14 +10236,14 @@ Example output:
           }
 
           // Update issues to mark them as matched
-          const matchedIssueNumbers = [...new Set(newMatches.map(m => m.issueNumber))];
+          const matchedIssueIds = [...new Set(newMatches.map(m => m.issueId))];
           await prisma.gitHubIssue.updateMany({
-            where: { issueNumber: { in: matchedIssueNumbers } },
+            where: { id: { in: matchedIssueIds } },
             data: { matchedToThreads: true },
           });
 
           console.error(`[MatchIssues] Saved ${savedCount} matches, ${errorCount} errors`);
-          console.error(`[MatchIssues] Updated ${matchedIssueNumbers.length} issues as matched`);
+          console.error(`[MatchIssues] Updated ${matchedIssueIds.length} issues as matched`);
 
           // Group matches by issue for summary
           const matchesByIssue = new Map<number, number>();
@@ -10138,13 +10269,13 @@ Example output:
               type: "text",
               text: JSON.stringify({
                 success: true,
-                message: `Matched ${matchedIssueNumbers.length} issues to ${newMatches.length} thread associations`,
+                message: `Matched ${matchedIssueIds.length} issues to ${newMatches.length} thread associations`,
                 stats: {
                   issues_processed: allIssues.length,
                   issues_with_embeddings: issueEmbeddingMap.size,
                   threads_searched: threadEmbeddings.length,
                   matches_found: newMatches.length,
-                  issues_matched: matchedIssueNumbers.length,
+                  issues_matched: matchedIssueIds.length,
                   matches_saved: savedCount,
                   errors: errorCount,
                 },
@@ -11629,7 +11760,8 @@ Example output:
     // ========================================================================
 
     case "seed_pr_learnings": {
-      const { since, limit, dry_run = false, batch_size = 50 } = args as {
+      const { repo, since, limit, dry_run = false, batch_size = 50 } = args as {
+        repo?: string;
         since?: string;
         limit?: number;
         dry_run?: boolean;
@@ -11641,6 +11773,7 @@ Example output:
         
         console.error("[PRLearning] Starting seed_pr_learnings...");
         const result = await seedPRLearnings({
+          repo,
           since,
           limit,
           dryRun: dry_run,
@@ -11672,7 +11805,8 @@ Example output:
     }
 
     case "learn_from_pr": {
-      const { pr_number, force = false } = args as {
+      const { repo, pr_number, force = false } = args as {
+        repo?: string;
         pr_number: number;
         force?: boolean;
       };
@@ -11685,7 +11819,7 @@ Example output:
         const { learnFromPR } = await import("../learning/prLearning.js");
         
         console.error(`[PRLearning] Learning from PR #${pr_number}...`);
-        const created = await learnFromPR(pr_number, force);
+        const created = await learnFromPR(pr_number, force, repo);
 
         return {
           content: [
@@ -12351,6 +12485,253 @@ Example output:
       } catch (error) {
         logError("import_claude_plans failed:", error);
         throw new Error(`import_claude_plans failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // ==================================================================
+    // X/Twitter Signal Source Handlers
+    // ==================================================================
+
+    case "fetch_x_posts": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for X post storage. Please configure DATABASE_URL.");
+        }
+
+        const { searchAllRecentTweets, buildSearchQuery } = await import("../connectors/x/client.js");
+        const { tweetsToPostRecords } = await import("../connectors/x/adapter.js");
+
+        let rawQuery = args?.query as string | undefined;
+        let users = args?.users as string[] | undefined;
+        let hashtags = args?.hashtags as string[] | undefined;
+        let keywords = args?.keywords as string[] | undefined;
+        const limit = Math.min((args?.limit as number | undefined) ?? 100, 500);
+        const incremental = (args?.incremental as boolean | undefined) ?? true;
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        if (!rawQuery && !users?.length && !hashtags?.length && !keywords?.length) {
+          const project = args?.project as string | undefined;
+          const projectId = project ?? detectProjectId();
+          const watches = await prisma.xWatchConfig.findMany({
+            where: { projectId, enabled: true },
+          });
+
+          if (watches.length === 0) {
+            throw new Error("No query, users, hashtags, or keywords provided, and no watch configs found. Use manage_x_watches to add some first.");
+          }
+
+          users = watches.filter((w) => w.type === "user").map((w) => w.value);
+          hashtags = watches.filter((w) => w.type === "hashtag").map((w) => w.value);
+          keywords = watches.filter((w) => w.type === "keyword").map((w) => w.value);
+          console.error(`[X] Using watch configs: ${users.length} users, ${hashtags.length} hashtags, ${keywords.length} keywords`);
+        }
+
+        const query = rawQuery ?? buildSearchQuery({ users, hashtags, keywords });
+        if (!query || query.trim() === "-is:retweet") {
+          throw new Error("Provide a query, users, hashtags, or keywords to search for.");
+        }
+
+        let sinceId: string | undefined;
+        if (incremental) {
+          const latest = await prisma.xPost.findFirst({
+            where: query ? { query } : {},
+            orderBy: { postedAt: "desc" },
+            select: { id: true },
+          });
+          sinceId = latest?.id;
+        }
+
+        console.error(`[X] Fetching posts: "${query}" (limit: ${limit}, since: ${sinceId ?? "none"})...`);
+        const { tweets, users: userMap } = await searchAllRecentTweets({ query, totalLimit: limit, sinceId });
+        const records = tweetsToPostRecords(tweets, userMap, query);
+
+        let saved = 0;
+        for (const record of records) {
+          await prisma.xPost.upsert({
+            where: { id: record.id },
+            create: record,
+            update: {
+              likeCount: record.likeCount,
+              retweetCount: record.retweetCount,
+              replyCount: record.replyCount,
+              quoteCount: record.quoteCount,
+            },
+          });
+          saved++;
+        }
+
+        console.error(`[X] Fetched ${tweets.length} tweets, saved ${saved} to database.`);
+
+        const topPosts = records
+          .sort((a, b) => (b.likeCount + b.retweetCount + b.quoteCount) - (a.likeCount + a.retweetCount + a.quoteCount))
+          .slice(0, 5)
+          .map((p) => ({
+            author: `@${p.authorUsername}`,
+            content: p.content.slice(0, 200),
+            engagement: p.likeCount + p.retweetCount + p.quoteCount,
+            url: `https://x.com/${p.authorUsername}/status/${p.id}`,
+          }));
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              query,
+              fetched: tweets.length,
+              saved,
+              topPosts,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        logError("fetch_x_posts failed:", error);
+        throw new Error(`fetch_x_posts failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "manage_x_watches": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for X watch configs. Please configure DATABASE_URL.");
+        }
+
+        const action = args?.action as string;
+        const type = args?.type as string | undefined;
+        const value = args?.value as string | undefined;
+        const project = args?.project as string | undefined;
+        const projectId = project ?? detectProjectId();
+
+        const { prisma } = await import("../storage/db/prisma.js");
+
+        if (action === "list") {
+          const watches = await prisma.xWatchConfig.findMany({
+            where: { projectId },
+            orderBy: { createdAt: "asc" },
+          });
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ watches, count: watches.length }, null, 2),
+            }],
+          };
+        }
+
+        if (!type || !value) {
+          throw new Error("type and value are required for add/remove actions.");
+        }
+
+        if (action === "add") {
+          const watch = await prisma.xWatchConfig.upsert({
+            where: {
+              projectId_type_value: { projectId, type, value },
+            },
+            create: { projectId, type, value, enabled: true },
+            update: { enabled: true },
+          });
+          console.error(`[X] Added watch: ${type}=${value} for project "${projectId}"`);
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ action: "added", watch }, null, 2),
+            }],
+          };
+        }
+
+        if (action === "remove") {
+          await prisma.xWatchConfig.deleteMany({
+            where: { projectId, type, value },
+          });
+          console.error(`[X] Removed watch: ${type}=${value} for project "${projectId}"`);
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ action: "removed", type, value }, null, 2),
+            }],
+          };
+        }
+
+        throw new Error(`Unknown action: ${action}. Use add, remove, or list.`);
+      } catch (error) {
+        logError("manage_x_watches failed:", error);
+        throw new Error(`manage_x_watches failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    case "search_x_posts": {
+      try {
+        const { hasDatabaseConfig } = await import("../storage/factory.js");
+        if (!hasDatabaseConfig()) {
+          throw new Error("Database is required for X post search. Please configure DATABASE_URL.");
+        }
+
+        const query = args?.query as string | undefined;
+        const author = args?.author as string | undefined;
+        const hashtag = args?.hashtag as string | undefined;
+        const minEngagement = args?.min_engagement as number | undefined;
+        const limit = Math.min((args?.limit as number | undefined) ?? 20, 100);
+        const days = (args?.days as number | undefined) ?? 7;
+
+        const { prisma } = await import("../storage/db/prisma.js");
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+        const posts = await prisma.xPost.findMany({
+          where: {
+            postedAt: { gte: since },
+            ...(query ? { content: { contains: query, mode: "insensitive" as const } } : {}),
+            ...(author ? { authorUsername: { equals: author, mode: "insensitive" as const } } : {}),
+            ...(hashtag ? { hashtags: { has: hashtag.replace("#", "") } } : {}),
+          },
+          orderBy: { postedAt: "desc" },
+          take: limit * 3,
+        });
+
+        let filtered = posts;
+        if (minEngagement !== undefined) {
+          filtered = posts.filter(
+            (p) => p.likeCount + p.retweetCount + p.quoteCount >= minEngagement,
+          );
+        }
+
+        filtered.sort(
+          (a, b) =>
+            (b.likeCount + b.retweetCount + b.quoteCount) -
+            (a.likeCount + a.retweetCount + a.quoteCount),
+        );
+
+        const results = filtered.slice(0, limit).map((p) => ({
+          id: p.id,
+          author: `@${p.authorUsername}`,
+          authorFollowers: p.authorFollowers,
+          content: p.content,
+          hashtags: p.hashtags,
+          engagement: {
+            likes: p.likeCount,
+            retweets: p.retweetCount,
+            replies: p.replyCount,
+            quotes: p.quoteCount,
+            total: p.likeCount + p.retweetCount + p.quoteCount,
+          },
+          postedAt: p.postedAt.toISOString(),
+          url: `https://x.com/${p.authorUsername}/status/${p.id}`,
+        }));
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              results,
+              count: results.length,
+              totalStored: posts.length,
+              period: `last ${days} days`,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        logError("search_x_posts failed:", error);
+        throw new Error(`search_x_posts failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 

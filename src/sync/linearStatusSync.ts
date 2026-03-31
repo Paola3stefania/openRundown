@@ -157,12 +157,15 @@ function extractGitHubPRUrls(text: string): GitHubPRUrl[] {
  */
 async function analyzeCommentsForClosureConfirmation(
   issueNumber: number,
-  prisma: PrismaClient
+  prisma: PrismaClient,
+  issueRepo?: string
 ): Promise<{ waitingForConfirmation: boolean; reason: string }> {
   try {
-    // Get issue with comments and cached analysis from database
-    const issue = await prisma.gitHubIssue.findUnique({
-      where: { issueNumber },
+    const config = getConfig();
+    const repo = issueRepo ?? `${config.github.owner}/${config.github.repo}`;
+    // Get issue with comments and cached analysis from database (issueNumber is not unique, use findFirst with repo)
+    const issue = await prisma.gitHubIssue.findFirst({
+      where: { issueRepo: repo, issueNumber },
       select: {
         issueTitle: true,
         issueBody: true,
@@ -290,8 +293,8 @@ Return JSON: {"waiting": true/false, "reason": "brief explanation"}`,
       const reason = analysis.reason || "Analyzed comments";
 
       // Cache the result in database, including comment count
-      await prisma.gitHubIssue.update({
-        where: { issueNumber },
+      await prisma.gitHubIssue.updateMany({
+        where: { issueRepo: repo, issueNumber },
         data: {
           waitingForClosureConfirmation: waitingForConfirmation,
           closureConfirmationReason: reason,
@@ -508,9 +511,11 @@ async function getIssueStatesFromDB(
       continue;
     }
     
-    // Check DB for issues from URL extraction
-    const cachedIssue = await prisma.gitHubIssue.findUnique({
-      where: { issueNumber },
+    // Check DB for issues from URL extraction (issueNumber not unique, use findFirst)
+    const config = getConfig();
+    const defaultRepo = `${config.github.owner}/${config.github.repo}`;
+    const cachedIssue = await prisma.gitHubIssue.findFirst({
+      where: { issueRepo: defaultRepo, issueNumber },
       select: { issueState: true },
     });
     
