@@ -8,7 +8,7 @@
 
 Agents get briefed on active issues, past decisions, and open items from previous sessions instead of re-exploring from scratch every time. Data fetched from local or shared DB within your team or org.
 
-Connects to GitHub, Discord, Slack, and Linear today, with a goal of supporting every tool your team uses to work and document -- Jira, Notion, Confluence, and more.
+Connects to GitHub, Discord, X/Twitter, and Linear today, with a goal of supporting every tool your team uses to work and document -- Slack, Jira, Notion, Confluence, and more.
 
 ## The Problem
 
@@ -16,16 +16,16 @@ Every time you open a new Cursor chat, the agent starts from zero. It doesn't kn
 
 ## How OpenRundown Solves It
 
-OpenRundown sits between your project signals (GitHub, Discord, past sessions) and your AI agents. It compresses everything into a compact briefing (~300-500 tokens) that the agent reads at session start.
+OpenRundown sits between your project signals (GitHub, Discord, X/Twitter, past sessions) and your AI agents. It compresses everything into a compact briefing (~300-500 tokens) that the agent reads at session start.
 
 ```
-GitHub Issues + Discord Threads + Past Sessions
-                    |
-              [ OpenRundown ]
-                    |
-            Compact Briefing JSON
-                    |
-         Agent starts with full context
+GitHub Issues + Discord Threads + X/Twitter + Past Sessions
+                          |
+                    [ OpenRundown ]
+                          |
+                  Compact Briefing JSON
+                          |
+               Agent starts with full context
 ```
 
 When the session ends, OpenRundown saves what happened -- decisions made, files edited, open items -- so the *next* agent picks up exactly where this one left off.
@@ -37,8 +37,9 @@ At session start, the agent automatically receives:
 - **Active issues** ranked by priority (security, bugs, regressions first)
 - **Recent decisions** from merged PRs and past sessions
 - **Open items** the last agent left unfinished
-- **User signals** -- recurring themes from Discord and GitHub
+- **User signals** -- recurring themes from Discord, GitHub, and X/Twitter
 - **Codebase notes** -- which files map to which features
+- **Multi-repo awareness** -- tracks issues and PRs across multiple repositories
 
 This all fits in ~300-500 tokens. No vector search needed at query time.
 
@@ -71,7 +72,7 @@ agents/session-tracker.md     -- session tracking agent
    cp env.example .env
    ```
    Required: `DISCORD_TOKEN`, `GITHUB_TOKEN`, `GITHUB_REPO_URL`
-   Optional: `OPENAI_API_KEY`, `DATABASE_URL`, `PM_TOOL_*`
+   Optional: `OPENAI_API_KEY`, `DATABASE_URL`, `PM_TOOL_*`, `X_BEARER_TOKEN`
 
 3. Database (optional, for persistent storage):
    ```bash
@@ -185,7 +186,7 @@ sync_classify_and_export   # Runs the full pipeline end to end
 
 ### What the pipeline does
 
-1. **Ingests** GitHub issues, Discord messages, and pull requests
+1. **Ingests** GitHub issues (multi-repo), Discord messages, X/Twitter mentions, and pull requests
 2. **Computes embeddings** for semantic matching across all sources
 3. **Groups** related issues (1 ticket per problem, not per report)
 4. **Matches** Discord threads to the GitHub issues they're discussing
@@ -210,6 +211,7 @@ See [PR Fix Tool Documentation](docs/OPEN_PR_WITH_FIX_TOOL.md) for details.
 ```
 src/
   briefing/        -- Distillation layer (the core: compresses signals into briefings)
+  connectors/      -- Source integrations (Discord, X/Twitter)
   mcp/             -- MCP server (40+ tools exposed to agents)
   export/          -- Linear/Jira export and sync
   config/          -- Project auto-detection and configuration
