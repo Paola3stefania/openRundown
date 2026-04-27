@@ -32,7 +32,9 @@
     "validate-linear": "tsx scripts/validate-linear-setup.ts",
     "briefing": "tsx scripts/briefing.ts",
     "save-session": "tsx scripts/save-session.ts",
-    "setup": "tsx scripts/setup.ts"
+    "setup": "tsx scripts/setup.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "mcp",
@@ -62,6 +64,7 @@
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vercel": "^39.0.0"
+    "vercel": "^39.0.0",
+    "vitest": "^4.1.5"
   }
 }

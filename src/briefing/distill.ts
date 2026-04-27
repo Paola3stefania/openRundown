@@ -10,9 +10,12 @@
 
 import { prisma } from "../storage/db/prisma.js";
 import { detectProjectId } from "../config/project.js";
+import { getRecentSessions } from "./sessions.js";
+import { getProjectDiscordGuilds } from "./projectScope.js";
 import type {
   ProjectContext,
   ActiveIssue,
+  AgentSession,
   UserSignal,
   TechSignal,
   CodebaseNote,
@@ -27,15 +30,38 @@ const MAX_USER_SIGNALS = 5;
 const MAX_CODEBASE_NOTES = 5;
 const MAX_DECISIONS = 5;
 const MAX_TECH_SIGNALS = 5;
+const SESSION_HISTORY_LIMIT = 15;
 
 export async function distillBriefing(options: BriefingOptions = {}): Promise<ProjectContext> {
+  const { briefing } = await distillBriefingWithSessions(options);
+  return briefing;
+}
+
+/**
+ * Same as `distillBriefing`, but returns the underlying recent sessions list
+ * alongside the briefing so callers (e.g. the MCP handler computing token
+ * savings) don't have to re-query the database.
+ */
+export async function distillBriefingWithSessions(
+  options: BriefingOptions = {},
+): Promise<{ briefing: ProjectContext; sessions: AgentSession[] }> {
   const since = options.since
     ? new Date(options.since)
     : new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
   const scope = options.scope?.toLowerCase();
   const projectId = options.project ?? detectProjectId();
-  const repo = options.repo;
+  // Auto-derive `repo` from `projectId` when it looks like `owner/repo`. This
+  // keeps GitHub-derived sections (issues, PRs) project-scoped instead of
+  // leaking results from other repos sharing the database.
+  const repo = options.repo ?? deriveRepoFromProjectId(projectId);
+
+  // Resolve which Discord guilds belong to this project. `undefined` means
+  // no mapping is configured anywhere (preserve legacy unfiltered behavior).
+  // An empty array means "this project owns no Discord data" — suppress
+  // Discord-derived signals so they don't leak from other projects sharing
+  // the database.
+  const discordGuilds = getProjectDiscordGuilds(projectId);
 
   const [
     activeIssues,
@@ -45,28 +71,40 @@ export async function distillBriefing(options: BriefingOptions = {}): Promise<Pr
     decisions,
     recentActivity,
     preferences,
+    sessions,
   ] = await Promise.all([
     distillActiveIssues(since, scope, repo),
-    distillUserSignals(since, scope),
+    distillUserSignals(since, scope, discordGuilds),
     distillTechSignals(since, scope),
     distillCodebaseNotes(scope),
     distillDecisions(since, scope, repo),
-    distillRecentActivity(since),
+    distillRecentActivity(since, discordGuilds),
     loadPreferences(projectId),
+    getRecentSessions(SESSION_HISTORY_LIMIT, projectId),
   ]);
 
-  return {
+  const sessionDerived = distillFromSessions(sessions, scope);
+
+  const briefing: ProjectContext = {
     project: projectId,
     focus: scope,
     lastUpdated: new Date().toISOString(),
-    decisions,
-    activeIssues,
+    decisions: mergeDecisions(decisions, sessionDerived.decisions),
+    activeIssues: mergeActiveIssues(activeIssues, sessionDerived.activeIssues),
     userSignals,
     techSignals,
-    codebaseNotes,
+    codebaseNotes: mergeCodebaseNotes(codebaseNotes, sessionDerived.codebaseNotes),
     recentActivity,
     preferences,
   };
+
+  return { briefing, sessions };
+}
+
+function deriveRepoFromProjectId(projectId: string): string | undefined {
+  const trimmed = projectId.trim();
+  if (!/^[^/\s]+\/[^/\s]+$/.test(trimmed)) return undefined;
+  return trimmed;
 }
 
 async function distillActiveIssues(since: Date, scope?: string, repo?: string): Promise<ActiveIssue[]> {
@@ -128,10 +166,22 @@ async function distillActiveIssues(since: Date, scope?: string, repo?: string): 
   }));
 }
 
-async function distillUserSignals(since: Date, scope?: string): Promise<UserSignal[]> {
+async function distillUserSignals(
+  since: Date,
+  scope?: string,
+  discordGuilds?: string[],
+): Promise<UserSignal[]> {
+  // If the operator configured per-project Discord scoping for this project
+  // and this project owns no guilds, suppress Discord-derived signals
+  // entirely instead of leaking other projects' groups.
+  if (discordGuilds && discordGuilds.length === 0) return [];
+
   const groups = await prisma.group.findMany({
     where: {
       createdAt: { gte: since },
+      ...(discordGuilds && discordGuilds.length > 0
+        ? { channel: { guildId: { in: discordGuilds } } }
+        : {}),
       ...(scope
         ? {
             OR: [
@@ -215,14 +265,10 @@ async function distillCodebaseNotes(scope?: string): Promise<CodebaseNote[]> {
     }
   }
 
-  const ungroupedCount = await prisma.ungroupedThread.count();
-  if (ungroupedCount > 10) {
-    notes.push({
-      area: "classification",
-      note: `${ungroupedCount} ungrouped threads need review`,
-      priority: ungroupedCount > 50 ? "high" : "medium",
-    });
-  }
+  // NOTE: `ungroupedThread` has no `projectId` column, so any global count
+  // would leak Discord-classification status from other projects sharing the
+  // database. Surfacing that count here is misleading; the dedicated Discord
+  // classification tools should be used instead.
 
   return notes.slice(0, MAX_CODEBASE_NOTES);
 }
@@ -271,7 +317,22 @@ async function distillDecisions(since: Date, scope?: string, repo?: string): Pro
   return decisions.slice(0, MAX_DECISIONS);
 }
 
-async function distillRecentActivity(since: Date): Promise<RecentActivity> {
+async function distillRecentActivity(
+  since: Date,
+  discordGuilds?: string[],
+): Promise<RecentActivity> {
+  const discordCount =
+    discordGuilds && discordGuilds.length === 0
+      ? Promise.resolve(0)
+      : prisma.classifiedThread.count({
+          where: {
+            classifiedAt: { gte: since },
+            ...(discordGuilds && discordGuilds.length > 0
+              ? { channel: { guildId: { in: discordGuilds } } }
+              : {}),
+          },
+        });
+
   const [issuesOpened, issuesClosed, prsOpened, prsMerged, discordThreads] = await Promise.all([
     prisma.gitHubIssue.count({
       where: { issueCreatedAt: { gte: since }, issueState: "open" },
@@ -285,9 +346,7 @@ async function distillRecentActivity(since: Date): Promise<RecentActivity> {
     prisma.gitHubPullRequest.count({
       where: { prCreatedAt: { gte: since }, prMerged: true },
     }),
-    prisma.classifiedThread.count({
-      where: { classifiedAt: { gte: since } },
-    }),
+    discordCount,
   ]);
 
   const days = Math.ceil((Date.now() - since.getTime()) / (24 * 60 * 60 * 1000));
@@ -401,4 +460,246 @@ function getReactionCount(reactions: unknown): number {
     if (typeof val === "number") total += val;
   }
   return total;
+}
+
+/**
+ * Approximate token savings between raw session payloads and the produced
+ * briefing. Uses the rough `chars / 4` heuristic — not a tokenizer-accurate
+ * count, but good enough for an order-of-magnitude indicator and avoids
+ * pulling in a tokenizer dependency just for telemetry.
+ */
+export interface TokenSavings {
+  estimatedSourceTokens: number;
+  briefingTokens: number;
+  estimatedSavedTokens: number;
+  compressionRatio: string;
+  method: "approx-chars-per-token";
+}
+
+const APPROX_CHARS_PER_TOKEN = 4;
+
+function approxTokens(text: string): number {
+  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN);
+}
+
+function approxSessionTokens(sessions: AgentSession[]): number {
+  let chars = 0;
+  for (const s of sessions) {
+    chars += s.summary?.length ?? 0;
+    for (const arr of [s.scope, s.decisionsMade, s.openItems, s.filesEdited, s.issuesReferenced, s.toolsUsed]) {
+      for (const entry of arr) chars += entry.length + 1;
+    }
+    if (s.planSteps) {
+      for (const step of s.planSteps) {
+        chars += step.description.length + step.id.length + step.status.length;
+        if (step.notes) chars += step.notes.length;
+      }
+    }
+  }
+  return Math.ceil(chars / APPROX_CHARS_PER_TOKEN);
+}
+
+export function estimateTokenSavings(
+  briefing: ProjectContext,
+  sessions: AgentSession[],
+): TokenSavings {
+  const sourceTokens = approxSessionTokens(sessions);
+  const briefingTokens = approxTokens(JSON.stringify(briefing));
+  const saved = Math.max(0, sourceTokens - briefingTokens);
+  const ratio = briefingTokens > 0 && sourceTokens > briefingTokens
+    ? `${Math.round(sourceTokens / briefingTokens)}:1`
+    : "1:1";
+
+  return {
+    estimatedSourceTokens: sourceTokens,
+    briefingTokens,
+    estimatedSavedTokens: saved,
+    compressionRatio: ratio,
+    method: "approx-chars-per-token",
+  };
+}
+
+
+/**
+ * Synthesize structured briefing fields from recent agent session history.
+ *
+ * The classified-data path (`distillActiveIssues` / `distillDecisions` /
+ * `distillCodebaseNotes`) only fires when GitHub issues, PRs, and feature
+ * mappings have been ingested. Most projects using OpenRundown for session
+ * memory have neither. Without a session-history fallback the briefing's
+ * structured arrays come back empty even when end_agent_session records
+ * contain the very data the agent is asking for.
+ *
+ * This helper extracts:
+ *   - `decisions` from `decisionsMade[]` across sessions (deduped)
+ *   - `activeIssues` from `openItems[]` (deduped, weighted by recurrence) and
+ *     non-completed entries from the most recent session's `planSteps`
+ *   - `codebaseNotes` from frequently-edited files in `filesEdited[]`
+ *
+ * Scope filtering is permissive: a session is "in scope" if any of its
+ * `scope` / `decisionsMade` / `openItems` / `filesEdited` text matches.
+ * If no sessions match scope, fall back to all recent sessions so the agent
+ * still sees something useful.
+ */
+export function distillFromSessions(
+  sessions: AgentSession[],
+  scope?: string,
+): { decisions: Decision[]; activeIssues: ActiveIssue[]; codebaseNotes: CodebaseNote[] } {
+  if (sessions.length === 0) {
+    return { decisions: [], activeIssues: [], codebaseNotes: [] };
+  }
+
+  const matchesScope = (s: AgentSession): boolean => {
+    if (!scope) return true;
+    const haystack = [
+      ...s.scope,
+      ...s.decisionsMade,
+      ...s.openItems,
+      ...s.filesEdited,
+      ...(s.planSteps?.map((p) => p.description) ?? []),
+    ]
+      .join("\n")
+      .toLowerCase();
+    return haystack.includes(scope);
+  };
+
+  const scoped = sessions.filter(matchesScope);
+  const sessionsToUse = scoped.length > 0 ? scoped : sessions;
+
+  const decisionMap = new Map<string, Decision>();
+  for (const session of sessionsToUse) {
+    const when = (session.endedAt ?? session.startedAt).split("T")[0];
+    const why = session.scope.length > 0
+      ? `Session scope: ${session.scope.join(", ")}`
+      : `From session ${session.sessionId.slice(0, 8)}`;
+    for (const text of session.decisionsMade) {
+      const key = text.toLowerCase().trim();
+      if (!key || decisionMap.has(key)) continue;
+      decisionMap.set(key, {
+        what: text,
+        why,
+        when,
+        status: "implemented",
+        openItems: [],
+      });
+    }
+  }
+  const decisions = [...decisionMap.values()].slice(0, MAX_DECISIONS);
+
+  type OpenItemEntry = {
+    summary: string;
+    count: number;
+    sessions: Set<string>;
+    sources: Set<string>;
+  };
+  const openItemMap = new Map<string, OpenItemEntry>();
+  const addOpenItem = (text: string, sessionId: string, source: string) => {
+    const key = text.toLowerCase().trim();
+    if (!key) return;
+    const existing = openItemMap.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.sessions.add(sessionId);
+      existing.sources.add(source);
+    } else {
+      openItemMap.set(key, {
+        summary: text,
+        count: 1,
+        sessions: new Set([sessionId]),
+        sources: new Set([source]),
+      });
+    }
+  };
+
+  for (const session of sessionsToUse) {
+    for (const item of session.openItems) {
+      addOpenItem(item, session.sessionId, "open-item");
+    }
+  }
+
+  const lastWithPlan = sessionsToUse.find((s) => (s.planSteps?.length ?? 0) > 0);
+  if (lastWithPlan?.planSteps) {
+    for (const step of lastWithPlan.planSteps) {
+      if (step.status === "completed") continue;
+      const label = `[${step.status}] ${step.description}`;
+      addOpenItem(label, lastWithPlan.sessionId, "plan-step");
+    }
+  }
+
+  const activeIssues: ActiveIssue[] = [...openItemMap.values()]
+    .sort((a, b) => b.count - a.count || b.sessions.size - a.sessions.size)
+    .slice(0, MAX_ACTIVE_ISSUES)
+    .map((entry, i) => ({
+      id: `session-item-${i + 1}`,
+      summary: entry.summary,
+      reports: entry.count,
+      source: [...entry.sources].includes("plan-step") ? "agent-plan" : "agent-session",
+      priority: entry.count >= 3 ? "high" : entry.count >= 2 ? "medium" : "low",
+      labels: [],
+      assignees: [],
+    }));
+
+  const fileMap = new Map<string, number>();
+  for (const session of sessionsToUse) {
+    for (const file of session.filesEdited) {
+      const trimmed = file.trim();
+      if (!trimmed) continue;
+      fileMap.set(trimmed, (fileMap.get(trimmed) ?? 0) + 1);
+    }
+  }
+  const codebaseNotes: CodebaseNote[] = [...fileMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_CODEBASE_NOTES)
+    .map(([file, count]) => ({
+      file,
+      note: `Edited in ${count} recent session${count === 1 ? "" : "s"}`,
+      priority: count >= 3 ? "high" : "medium",
+    }));
+
+  return { decisions, activeIssues, codebaseNotes };
+}
+
+export function mergeDecisions(primary: Decision[], session: Decision[]): Decision[] {
+  const seen = new Set(primary.map((d) => d.what.toLowerCase().trim()));
+  const merged = [...primary];
+  for (const d of session) {
+    const key = d.what.toLowerCase().trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(d);
+    if (merged.length >= MAX_DECISIONS) break;
+  }
+  return merged;
+}
+
+export function mergeActiveIssues(primary: ActiveIssue[], session: ActiveIssue[]): ActiveIssue[] {
+  const seen = new Set(primary.map((i) => i.summary.toLowerCase().trim()));
+  const merged = [...primary];
+  for (const i of session) {
+    const key = i.summary.toLowerCase().trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(i);
+    if (merged.length >= MAX_ACTIVE_ISSUES) break;
+  }
+  return merged;
+}
+
+export function mergeCodebaseNotes(primary: CodebaseNote[], session: CodebaseNote[]): CodebaseNote[] {
+  const seen = new Set<string>();
+  for (const n of primary) {
+    if (n.file) seen.add(`file:${n.file}`);
+    if (n.area) seen.add(`area:${n.area.toLowerCase()}`);
+  }
+  const merged = [...primary];
+  for (const n of session) {
+    const fileKey = n.file ? `file:${n.file}` : undefined;
+    const areaKey = n.area ? `area:${n.area.toLowerCase()}` : undefined;
+    if ((fileKey && seen.has(fileKey)) || (areaKey && seen.has(areaKey))) continue;
+    if (fileKey) seen.add(fileKey);
+    if (areaKey) seen.add(areaKey);
+    merged.push(n);
+    if (merged.length >= MAX_CODEBASE_NOTES) break;
+  }
+  return merged;
 }

@@ -1494,21 +1494,25 @@ const tools: Tool[] = [
   },
   {
     name: "get_session_history",
-    description: "Get recent agent session history for the current project. Shows what agents worked on in past sessions, including files edited, decisions made, and open items. Useful for understanding recent context and picking up where the last session left off.",
+    description: "Get recent agent session history for the current project. Returns compact summaries by default (scope, truncated summary, counts of files/decisions/open items, plan step status, first few open items) to stay within MCP response size limits. Pass verbose:true to get full session objects, or pass session_id to retrieve one full session.",
     inputSchema: {
       type: "object",
       properties: {
         limit: {
           type: "number",
-          description: "Number of recent sessions to return (default: 5).",
+          description: "Number of recent sessions to return. Default 5. Capped at 50 in compact mode and 10 in verbose mode to avoid exceeding response size limits.",
         },
         session_id: {
           type: "string",
-          description: "Optional specific session ID to retrieve (ignores project filter).",
+          description: "Optional specific session ID to retrieve (always returns the full session; ignores project filter and verbose/limit).",
         },
         project: {
           type: "string",
           description: "Optional project identifier to filter sessions. Defaults to the auto-detected current project.",
+        },
+        verbose: {
+          type: "boolean",
+          description: "If true, return full session objects (filesEdited, decisionsMade, openItems, planSteps, full summary). Default false for a compact summary list.",
         },
       },
       required: [],
@@ -12199,7 +12203,7 @@ Example output:
           throw new Error("Database is required for agent briefings. Please configure DATABASE_URL.");
         }
 
-        const { distillBriefing } = await import("../briefing/distill.js");
+        const { distillBriefingWithSessions, estimateTokenSavings } = await import("../briefing/distill.js");
         const { getLastSession, closeStaleSessions } = await import("../briefing/sessions.js");
 
         const scope = args?.scope as string | undefined;
@@ -12211,8 +12215,9 @@ Example output:
 
         console.error(`[Briefing] Generating agent briefing for project "${projectId}"${scope ? ` (scope: ${scope})` : ""}...`);
 
-        const briefing = await distillBriefing({ scope, since, project: projectId });
+        const { briefing, sessions } = await distillBriefingWithSessions({ scope, since, project: projectId });
         const lastSession = await getLastSession(projectId);
+        const tokenSavings = estimateTokenSavings(briefing, sessions);
 
         const result = {
           briefing,
@@ -12226,10 +12231,13 @@ Example output:
                 ...(lastSession.planSteps && lastSession.planSteps.length > 0 && { planSteps: lastSession.planSteps }),
               }
             : null,
+          tokenSavings,
           ...(staleClosed > 0 && { staleSessionsClosed: staleClosed }),
         };
 
-        console.error(`[Briefing] Generated briefing: ${briefing.activeIssues.length} issues, ${briefing.userSignals.length} signals, ${briefing.decisions.length} decisions${staleClosed ? `, ${staleClosed} stale session(s) auto-closed` : ""}`);
+        console.error(
+          `[Briefing] Generated briefing: ${briefing.activeIssues.length} issues, ${briefing.userSignals.length} signals, ${briefing.decisions.length} decisions; ~${tokenSavings.estimatedSavedTokens} tokens saved (ratio ${tokenSavings.compressionRatio})${staleClosed ? `, ${staleClosed} stale session(s) auto-closed` : ""}`,
+        );
 
         return {
           content: [
@@ -12357,9 +12365,12 @@ Example output:
           throw new Error("Database is required for session history. Please configure DATABASE_URL.");
         }
 
-        const { getRecentSessions, getSession } = await import("../briefing/sessions.js");
+        const { getRecentSessions, getSession, summarizeSession } = await import("../briefing/sessions.js");
         const sessionId = args?.session_id as string | undefined;
-        const limit = (args?.limit as number | undefined) ?? 5;
+        const verbose = (args?.verbose as boolean | undefined) ?? false;
+        const requestedLimit = (args?.limit as number | undefined) ?? 5;
+        const maxLimit = verbose ? 10 : 50;
+        const limit = Math.max(1, Math.min(requestedLimit, maxLimit));
         const project = args?.project as string | undefined;
         const projectId = project ?? detectProjectId();
 
@@ -12377,15 +12388,31 @@ Example output:
           };
         }
 
-        console.error(`[Session] Fetching last ${limit} sessions for project "${projectId}"...`);
+        console.error(
+          `[Session] Fetching last ${limit} sessions for project "${projectId}" (verbose=${verbose})...`,
+        );
         const sessions = await getRecentSessions(limit, projectId);
         console.error(`[Session] Found ${sessions.length} sessions`);
+
+        const payload = verbose
+          ? { sessions, count: sessions.length, mode: "verbose" }
+          : {
+              sessions: sessions.map(summarizeSession),
+              count: sessions.length,
+              mode: "compact",
+              hint: "Pass verbose:true or session_id for full session details. Compact mode replaces arrays with counts and previews.",
+            };
+
+        if (requestedLimit !== limit) {
+          (payload as Record<string, unknown>).limitCappedFrom = requestedLimit;
+          (payload as Record<string, unknown>).limitApplied = limit;
+        }
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ sessions, count: sessions.length }, null, 2),
+              text: JSON.stringify(payload, null, 2),
             },
           ],
         };

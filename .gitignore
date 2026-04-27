@@ -22,3 +22,6 @@ cursor-mcp-config.json
 
 # Machine-specific MCP launcher (contains absolute paths)
 run-mcp.sh
+
+# Local-only scripts, notes, and one-off SQL (never commit)
+local/

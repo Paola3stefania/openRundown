@@ -171,6 +171,76 @@ export async function getLastSession(projectId?: string): Promise<AgentSession |
   return session ? mapSession(session) : null;
 }
 
+/**
+ * Compact view of a session — optimized for listing many sessions without
+ * blowing past MCP response size limits. Arrays are replaced with counts and
+ * small previews; long strings (summary) are truncated.
+ */
+export interface AgentSessionSummary {
+  sessionId: string;
+  projectId: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  scope: string[];
+  summary?: string;
+  summaryTruncated: boolean;
+  counts: {
+    filesEdited: number;
+    decisionsMade: number;
+    openItems: number;
+    issuesReferenced: number;
+    toolsUsed: number;
+    planSteps: number;
+  };
+  openItemsPreview: string[];
+  planStepsStatus: Record<PlanStep["status"], number>;
+}
+
+const SUMMARY_MAX_CHARS = 280;
+const OPEN_ITEMS_PREVIEW = 5;
+
+export function summarizeSession(session: AgentSession): AgentSessionSummary {
+  const summary = session.summary ?? "";
+  const summaryTruncated = summary.length > SUMMARY_MAX_CHARS;
+  const planStepsStatus: Record<PlanStep["status"], number> = {
+    pending: 0,
+    in_progress: 0,
+    completed: 0,
+    blocked: 0,
+  };
+  for (const step of session.planSteps ?? []) {
+    planStepsStatus[step.status] = (planStepsStatus[step.status] ?? 0) + 1;
+  }
+
+  const startedMs = Date.parse(session.startedAt);
+  const endedMs = session.endedAt ? Date.parse(session.endedAt) : undefined;
+
+  return {
+    sessionId: session.sessionId,
+    projectId: session.projectId,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    durationMs:
+      endedMs !== undefined && !Number.isNaN(startedMs) && !Number.isNaN(endedMs)
+        ? endedMs - startedMs
+        : undefined,
+    scope: session.scope,
+    summary: summaryTruncated ? `${summary.slice(0, SUMMARY_MAX_CHARS)}…` : summary || undefined,
+    summaryTruncated,
+    counts: {
+      filesEdited: session.filesEdited.length,
+      decisionsMade: session.decisionsMade.length,
+      openItems: session.openItems.length,
+      issuesReferenced: session.issuesReferenced.length,
+      toolsUsed: session.toolsUsed.length,
+      planSteps: session.planSteps?.length ?? 0,
+    },
+    openItemsPreview: session.openItems.slice(0, OPEN_ITEMS_PREVIEW),
+    planStepsStatus,
+  };
+}
+
 function parsePlanSteps(raw: unknown): PlanStep[] | undefined {
   if (!raw) return undefined;
   if (Array.isArray(raw)) return raw as PlanStep[];
